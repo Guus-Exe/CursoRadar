@@ -65,6 +65,9 @@ class AlertModel(Base):
     channel = Column(String(50), default="telegram", nullable=False)
     sent_at = Column(DateTime, default=datetime.now, nullable=False)
     message_content = Column(Text, nullable=False)
+    user_id = Column(String(100), index=True, nullable=True)
+    monitor_id = Column(String(100), index=True, nullable=True)
+    fingerprint = Column(String(64), unique=True, index=True, nullable=True)
 
 
 class SettingModel(Base):
@@ -226,13 +229,20 @@ class Database:
     def is_duplicate_alert(
         self,
         alert_type: str,
-        offer_id: Optional[str],
-        state_hash: Optional[str],
+        offer_id: Optional[str] = None,
+        state_hash: Optional[str] = None,
         channel: str = "telegram",
         cooldown_hours: int = 12,
+        fingerprint: Optional[str] = None,
     ) -> bool:
-        """Verifies if an identical alert was already sent within cooldown window."""
+        """Verifies if an identical alert was already sent within cooldown window or matches fingerprint."""
         with self.get_session() as session:
+            # If fingerprint is provided, check if that exact fingerprint was ever recorded
+            if fingerprint:
+                fp_stmt = select(AlertModel).where(AlertModel.fingerprint == fingerprint)
+                if session.execute(fp_stmt).scalar_one_or_none():
+                    return True
+
             cutoff = datetime.now() - timedelta(hours=cooldown_hours)
             query = select(AlertModel).where(
                 AlertModel.alert_type == alert_type,
@@ -250,13 +260,25 @@ class Database:
     def record_alert(
         self,
         alert_type: str,
-        offer_id: Optional[str],
-        state_hash: Optional[str],
-        message_content: str,
+        offer_id: Optional[str] = None,
+        state_hash: Optional[str] = None,
+        message_content: str = "",
         channel: str = "telegram",
-    ) -> None:
-        """Records an alert dispatch to avoid duplicate triggers."""
+        user_id: Optional[str] = None,
+        monitor_id: Optional[str] = None,
+        fingerprint: Optional[str] = None,
+    ) -> Optional[AlertModel]:
+        """Records an alert dispatch to avoid duplicate triggers. Rejects duplicates if fingerprint exists."""
         with self.get_session() as session:
+            effective_fp = fingerprint or (state_hash if state_hash and len(state_hash) == 64 else None)
+            if effective_fp:
+                existing = session.execute(
+                    select(AlertModel).where(AlertModel.fingerprint == effective_fp)
+                ).scalar_one_or_none()
+                if existing:
+                    logger.debug(f"Alerta duplicado rejeitado no banco para fingerprint {effective_fp}")
+                    return None
+
             alert = AlertModel(
                 alert_type=alert_type,
                 offer_id=offer_id,
@@ -264,9 +286,14 @@ class Database:
                 channel=channel,
                 sent_at=datetime.now(),
                 message_content=message_content,
+                user_id=user_id,
+                monitor_id=monitor_id,
+                fingerprint=effective_fp,
             )
             session.add(alert)
             session.commit()
+            session.refresh(alert)
+            return alert
 
     def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Gets runtime setting value."""

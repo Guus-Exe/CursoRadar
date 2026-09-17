@@ -1,16 +1,18 @@
 """Senac São Paulo concrete EducationProvider implementation."""
 
-from typing import List, Optional
+from typing import Any, List, Optional
 import httpx
 from app.config import Settings, get_settings
 from app.models import DiscoveredOffer, OfferState
-from app.providers.base import CourseData, EducationProvider, LocationData
+from app.providers.base import CourseData, EducationProvider, LocationData, NormalizedOffer
 from app.scrapers.senac import SenacScraper
 from app.utils.logger import logger
 
 
 class SenacSPProvider(EducationProvider):
     """Education provider implementation for Senac São Paulo."""
+
+    enabled: bool = True
 
     def __init__(
         self,
@@ -21,12 +23,43 @@ class SenacSPProvider(EducationProvider):
         self.scraper = SenacScraper(client=client)
 
     @property
+    def slug(self) -> str:
+        return "senac_sp"
+
+    @property
+    def name(self) -> str:
+        return "Senac São Paulo"
+
+    @property
     def institution_slug(self) -> str:
         return "senac-sp"
 
     @property
     def institution_name(self) -> str:
         return "Senac São Paulo"
+
+    def healthcheck(self) -> bool:
+        return True
+
+    async def search_offers(self, query: str = "", **kwargs: Any) -> List[NormalizedOffer]:
+        """Searches Senac offers and normalizes them into NormalizedOffer."""
+        courses = await self.search_courses(query)
+        offers: List[NormalizedOffer] = []
+        for course in courses:
+            offers.append(
+                NormalizedOffer(
+                    provider_slug=self.slug,
+                    external_id=course.external_id,
+                    title=course.name,
+                    institution_name=self.name,
+                    modality="presencial",
+                    shift="qualquer",
+                    source_url="https://www.sp.senac.br",
+                    status="Disponível",
+                    raw_data={"course_slug": course.slug, "category": course.category},
+                )
+            )
+        return offers
 
     async def get_locations(self) -> List[LocationData]:
         """Returns catalog of known Senac SP units."""

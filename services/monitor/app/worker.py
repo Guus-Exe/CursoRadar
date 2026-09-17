@@ -11,6 +11,7 @@ from app.matching import MatchingEngine, MatchResult, MonitorPreferences, OfferC
 from app.models import DiscoveredOffer, OfferState, StateDiff
 from app.notifications.telegram import TelegramProvider
 from app.providers.base import EducationProvider
+from app.providers.registry import ProviderRegistry, get_provider_registry
 from app.providers.senac import SenacSPProvider
 from app.telegram_link import TelegramLinkManager
 from app.utils.diff import compute_offer_diff
@@ -26,6 +27,7 @@ class CourseWorker:
         settings: Optional[Settings] = None,
         database: Optional[Database] = None,
         provider: Optional[EducationProvider] = None,
+        registry: Optional[ProviderRegistry] = None,
         telegram_provider: Optional[TelegramProvider] = None,
         link_manager: Optional[TelegramLinkManager] = None,
         matching_engine: Optional[MatchingEngine] = None,
@@ -33,10 +35,20 @@ class CourseWorker:
         self.worker_id = worker_id
         self.settings = settings or get_settings()
         self.db = database or Database(self.settings.database_url)
-        self.provider = provider or SenacSPProvider(settings=self.settings)
+        self.registry = registry or ProviderRegistry()
+        if provider:
+            self.provider = provider
+            self.registry.register(provider)
+        elif not self.registry.list_providers():
+            default_senac = SenacSPProvider(settings=self.settings)
+            self.provider = default_senac
+            self.registry.register(default_senac)
+        else:
+            self.provider = next(iter(self.registry.list_providers()), None)
+
         self.link_manager = link_manager or TelegramLinkManager()
         self.telegram_provider = telegram_provider or TelegramProvider(link_manager=self.link_manager)
-        self.matching_engine = matching_engine or MatchingEngine()
+        self.matching_engine = matching_engine or MatchingEngine(registry=self.registry)
         self.scheduler = AsyncIOScheduler()
         self._lock = asyncio.Lock()
         self.consecutive_failures = 0
@@ -56,7 +68,7 @@ class CourseWorker:
             logger.info(f"Monitor {monitor.id} registrado para usuário {monitor.user_id}.")
 
     async def run_check_cycle(self) -> Dict[str, Any]:
-        """Executes a full verification cycle across all tracked offers."""
+        """Executes a full verification cycle across all tracked offers and active providers."""
         if self.is_paused:
             logger.info("Ciclo de verificação ignorado: worker em pausa.")
             return {"status": "paused", "offers_checked": 0}
@@ -68,106 +80,124 @@ class CourseWorker:
         alerts_sent = 0
 
         async with self._lock:
-            # 1. Collect distinct offers to verify
             target_offer_id = self.settings.target_offer_id or "9900357333"
             target_url = self.settings.senac_offer_url
 
-            logger.info(f"[{self.worker_id}] Iniciando ciclo de checagem. Oferta alvo: {target_offer_id}")
+            logger.info(f"[{self.worker_id}] Iniciando ciclo de checagem multi-provider.")
 
-            try:
-                offers_checked += 1
-                # 2. Fetch current state from institution provider
-                current_state = await self.provider.get_offer_state(target_url)
-                offers_succeeded += 1
+            active_providers = self.registry.get_active_providers()
+            if not active_providers:
+                logger.warning(f"[{self.worker_id}] Nenhum provedor ativo encontrado no registry.")
 
-                # 3. Retrieve previous state
-                previous_state = self.db.get_last_state(target_offer_id)
+            for p_slug, p_instance in active_providers.items():
+                logger.info(f"[{self.worker_id}] Verificando provider '{p_slug}' ({p_instance.name})")
+                try:
+                    offers_checked += 1
+                    current_state = await p_instance.get_offer_state(target_url)
+                    offers_succeeded += 1
 
-                # 4. Compute state diff
-                diff = compute_offer_diff(previous_state, current_state)
+                    # Retrieve previous state
+                    previous_state = self.db.get_last_state(target_offer_id)
 
-                # 5. Handle detected changes and matching
-                if diff.has_changed:
-                    logger.info(f"[{self.worker_id}] Mudança detectada na oferta {target_offer_id}!")
-                    for reason in diff.reasons:
-                        logger.info(f"  • {reason}")
+                    # Compute state diff
+                    diff = compute_offer_diff(previous_state, current_state)
 
-                    # Determine change type
-                    change_type = "STATUS_CHANGE"
-                    if not (previous_state and previous_state.inscricao_disponivel) and current_state.inscricao_disponivel:
-                        change_type = "ENROLLMENT_OPEN"
-                    elif not (previous_state and previous_state.bolsa_disponivel) and current_state.bolsa_disponivel:
-                        change_type = "SCHOLARSHIP_OPEN"
+                    # Handle detected changes and matching
+                    if diff.has_changed:
+                        logger.info(f"[{self.worker_id}] Mudança detectada na oferta {target_offer_id} pelo provider {p_slug}!")
+                        for reason in diff.reasons:
+                            logger.info(f"  • {reason}")
 
-                    event = OfferChangeEvent(
-                        offer_id=target_offer_id,
-                        institution_id="11111111-1111-1111-1111-111111111111",
-                        location_id="22222222-2222-2222-2222-222222222221",
-                        course_id="33333333-3333-3333-3333-333333333331",
-                        shift=current_state.turno,
-                        change_type=change_type,
-                        reasons=diff.reasons,
-                        previous_state=previous_state,
-                        current_state=current_state,
-                        url=target_url,
-                    )
+                        change_type = "STATUS_CHANGE"
+                        if not (previous_state and previous_state.inscricao_disponivel) and current_state.inscricao_disponivel:
+                            change_type = "ENROLLMENT_OPEN"
+                        elif not (previous_state and previous_state.bolsa_disponivel) and current_state.bolsa_disponivel:
+                            change_type = "SCHOLARSHIP_OPEN"
 
-                    # Execute matching against all active user monitors
-                    matches = self.matching_engine.match(event, self.active_monitors)
-
-                    # Dispatch personalized alerts
-                    for match in matches:
-                        sent = await self.telegram_provider.send_to_user(
-                            recipient_id=match.telegram_chat_id,
-                            text=match.message,
+                        event = OfferChangeEvent(
+                            offer_id=target_offer_id,
+                            provider_slug=p_slug,
+                            institution_name=p_instance.name,
+                            institution_id="11111111-1111-1111-1111-111111111111",
+                            location_id="22222222-2222-2222-2222-222222222221",
+                            course_id="33333333-3333-3333-3333-333333333331",
+                            shift=current_state.turno,
+                            change_type=change_type,
+                            reasons=diff.reasons,
+                            previous_state=previous_state,
+                            current_state=current_state,
+                            url=target_url,
                         )
-                        if sent:
-                            alerts_sent += 1
-                            self.db.record_alert(
+
+                        # Execute matching against all active user monitors
+                        matches = self.matching_engine.match(event, self.active_monitors)
+
+                        # Dispatch personalized alerts
+                        for match in matches:
+                            if self.db.is_duplicate_alert(
                                 alert_type=match.change_type,
                                 offer_id=match.offer_id,
                                 state_hash=match.fingerprint,
-                                message_content=match.message,
                                 channel="telegram",
+                                fingerprint=match.fingerprint,
+                            ):
+                                logger.debug(f"Alerta já enviado no banco para {match.fingerprint}")
+                                continue
+
+                            sent = await self.telegram_provider.send_to_user(
+                                recipient_id=match.telegram_chat_id,
+                                text=match.message,
                             )
+                            if sent:
+                                alerts_sent += 1
+                                self.db.record_alert(
+                                    alert_type=match.change_type,
+                                    offer_id=match.offer_id,
+                                    state_hash=match.fingerprint,
+                                    message_content=match.message,
+                                    channel="telegram",
+                                    user_id=match.user_id,
+                                    monitor_id=match.monitor_id,
+                                    fingerprint=match.fingerprint,
+                                )
 
-                # 6. Persist offer state and check entry
-                self.db.upsert_offer(
-                    offer_id=target_offer_id,
-                    curso=current_state.curso,
-                    unidade=current_state.unidade,
-                    turno=current_state.turno,
-                    url=target_url,
-                    state=current_state,
-                )
-                self.db.record_check(
-                    offer_id=target_offer_id,
-                    is_success=True,
-                    status_code=200,
-                    state=current_state,
-                    diff=diff,
-                )
-                self.consecutive_failures = 0
+                    # Persist offer state and check entry
+                    self.db.upsert_offer(
+                        offer_id=target_offer_id,
+                        curso=current_state.curso,
+                        unidade=current_state.unidade,
+                        turno=current_state.turno,
+                        url=target_url,
+                        state=current_state,
+                    )
+                    self.db.record_check(
+                        offer_id=target_offer_id,
+                        is_success=True,
+                        status_code=200,
+                        state=current_state,
+                        diff=diff,
+                    )
+                    self.consecutive_failures = 0
 
-            except Exception as err:
-                offers_failed += 1
-                self.consecutive_failures += 1
-                error_msg = f"{type(err).__name__}: {str(err)}"
-                logger.error(f"[{self.worker_id}] Falha ao verificar oferta {target_offer_id}: {error_msg}")
+                except Exception as err:
+                    offers_failed += 1
+                    self.consecutive_failures += 1
+                    error_msg = f"{type(err).__name__}: {str(err)}"
+                    logger.error(f"[{self.worker_id}] Falha ao verificar provider {p_slug}: {error_msg}")
 
-                self.db.record_check(
-                    offer_id=target_offer_id,
-                    is_success=False,
-                    status_code=500,
-                    error_message=error_msg,
-                )
-                self.db.record_system_error(
-                    source=f"worker:{self.worker_id}",
-                    error_type=type(err).__name__,
-                    message=str(err),
-                )
+                    self.db.record_check(
+                        offer_id=target_offer_id,
+                        is_success=False,
+                        status_code=500,
+                        error_message=error_msg,
+                    )
+                    self.db.record_system_error(
+                        source=f"worker:{self.worker_id}:{p_slug}",
+                        error_type=type(err).__name__,
+                        message=str(err),
+                    )
 
-            # 7. Record heartbeat & operational observability
+            # Record heartbeat & operational observability
             duration = time.time() - start_time
             self.db.record_worker_heartbeat(
                 worker_id=self.worker_id,
@@ -190,66 +220,91 @@ class CourseWorker:
             }
 
     async def run_discovery_cycle(self) -> List[DiscoveredOffer]:
-        """Discovers new course offers and matches with monitors."""
+        """Discovers new course offers and matches with monitors across all active providers."""
         if self.is_paused:
             return []
 
-        logger.info(f"[{self.worker_id}] Iniciando descoberta de novas ofertas...")
-        try:
-            discovered = await self.provider.discover_offers(
-                course_name=self.settings.course_name,
-                unit_name=self.settings.unit_name,
-                shift=self.settings.target_shift,
-            )
+        logger.info(f"[{self.worker_id}] Iniciando descoberta de novas ofertas multi-provider...")
+        all_discovered: List[DiscoveredOffer] = []
+        active_providers = self.registry.get_active_providers()
 
-            for offer in discovered:
-                existing = self.db.get_offer(offer.codigo_oferta)
-                if not existing:
-                    logger.info(f"[{self.worker_id}] Nova oferta descoberta: {offer.codigo_oferta} ({offer.turno})")
-                    self.db.upsert_offer(
-                        offer_id=offer.codigo_oferta,
-                        curso=offer.curso,
-                        unidade=offer.unidade,
-                        turno=offer.turno,
-                        url=offer.url,
-                    )
-                    # Create event and match
-                    state = OfferState(
-                        curso=offer.curso,
-                        unidade=offer.unidade,
-                        turno=offer.turno,
-                        status="Nova oferta aberta",
-                        codigo_oferta=offer.codigo_oferta,
-                        inscricao_disponivel=offer.vagas_disponiveis,
-                        bolsa_disponivel=offer.bolsa_disponivel,
-                    )
-                    event = OfferChangeEvent(
-                        offer_id=offer.codigo_oferta,
-                        institution_id="11111111-1111-1111-1111-111111111111",
-                        location_id="22222222-2222-2222-2222-222222222221",
-                        course_id="33333333-3333-3333-3333-333333333331",
-                        shift=offer.turno,
-                        change_type="NEW_OFFER",
-                        reasons=["Nova turma aberta pela instituição!"],
-                        current_state=state,
-                        url=offer.url,
-                    )
-                    matches = self.matching_engine.match(event, self.active_monitors)
-                    for match in matches:
-                        await self.telegram_provider.send_to_user(
-                            recipient_id=match.telegram_chat_id,
-                            text=match.message,
+        for p_slug, p_instance in active_providers.items():
+            try:
+                discovered = await p_instance.discover_offers(
+                    course_name=self.settings.course_name,
+                    unit_name=self.settings.unit_name,
+                    shift=self.settings.target_shift,
+                )
+
+                for offer in discovered:
+                    existing = self.db.get_offer(offer.codigo_oferta)
+                    if not existing:
+                        logger.info(f"[{self.worker_id}][{p_slug}] Nova oferta descoberta: {offer.codigo_oferta} ({offer.turno})")
+                        self.db.upsert_offer(
+                            offer_id=offer.codigo_oferta,
+                            curso=offer.curso,
+                            unidade=offer.unidade,
+                            turno=offer.turno,
+                            url=offer.url,
                         )
+                        state = OfferState(
+                            curso=offer.curso,
+                            unidade=offer.unidade,
+                            turno=offer.turno,
+                            status="Nova oferta aberta",
+                            codigo_oferta=offer.codigo_oferta,
+                            inscricao_disponivel=offer.vagas_disponiveis,
+                            bolsa_disponivel=offer.bolsa_disponivel,
+                        )
+                        event = OfferChangeEvent(
+                            offer_id=offer.codigo_oferta,
+                            provider_slug=p_slug,
+                            institution_name=p_instance.name,
+                            institution_id="11111111-1111-1111-1111-111111111111",
+                            location_id="22222222-2222-2222-2222-222222222221",
+                            course_id="33333333-3333-3333-3333-333333333331",
+                            shift=offer.turno,
+                            change_type="NEW_OFFER",
+                            reasons=["Nova turma aberta pela instituição!"],
+                            current_state=state,
+                            url=offer.url,
+                        )
+                        matches = self.matching_engine.match(event, self.active_monitors)
+                        for match in matches:
+                            if self.db.is_duplicate_alert(
+                                alert_type=match.change_type,
+                                offer_id=match.offer_id,
+                                state_hash=match.fingerprint,
+                                channel="telegram",
+                                fingerprint=match.fingerprint,
+                            ):
+                                continue
+                            sent = await self.telegram_provider.send_to_user(
+                                recipient_id=match.telegram_chat_id,
+                                text=match.message,
+                            )
+                            if sent:
+                                self.db.record_alert(
+                                    alert_type=match.change_type,
+                                    offer_id=match.offer_id,
+                                    state_hash=match.fingerprint,
+                                    message_content=match.message,
+                                    channel="telegram",
+                                    user_id=match.user_id,
+                                    monitor_id=match.monitor_id,
+                                    fingerprint=match.fingerprint,
+                                )
 
-            return discovered
-        except Exception as err:
-            logger.error(f"[{self.worker_id}] Erro no ciclo de descoberta: {err}")
-            self.db.record_system_error(
-                source=f"worker:{self.worker_id}:discovery",
-                error_type=type(err).__name__,
-                message=str(err),
-            )
-            return []
+                all_discovered.extend(discovered)
+            except Exception as err:
+                logger.error(f"[{self.worker_id}] Erro no ciclo de descoberta para provider '{p_slug}': {err}")
+                self.db.record_system_error(
+                    source=f"worker:{self.worker_id}:{p_slug}:discovery",
+                    error_type=type(err).__name__,
+                    message=str(err),
+                )
+
+        return all_discovered
 
     def start_scheduler(self) -> None:
         """Starts background scheduling."""

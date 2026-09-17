@@ -5,25 +5,38 @@ import crypto from "crypto";
 export async function POST() {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
 
-    // Fallback user ID for demo/development when auth is bypassed or previewed
-    const userId = user?.id || "00000000-0000-0000-0000-000000000001";
+    // 1. Validação estrita de autenticação server-side
+    if (authError || !user) {
+      return NextResponse.json(
+        { error: "Não autorizado. Faça login para vincular sua conta do Telegram." },
+        { status: 401 }
+      );
+    }
 
+    // 2. Geração de token criptográfico temporário (15 minutos de TTL)
     const token = crypto.randomBytes(24).toString("hex");
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    const botUsername = process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME || "CursoRadarAlertsBot";
+    const botUsername =
+      process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME || "CursoRadarAlertsBot";
 
-    // Attempt to persist token to database
-    try {
-      await supabase.from("telegram_link_tokens").insert({
-        user_id: userId,
-        token,
-        expires_at: expiresAt,
-        used: false,
-      });
-    } catch (dbErr) {
-      console.warn("Could not save telegram link token to DB (mock mode active):", dbErr);
+    // 3. Persistência estrita no schema public.telegram_link_tokens do Supabase
+    const { error: dbError } = await supabase.from("telegram_link_tokens").insert({
+      user_id: user.id,
+      token,
+      expires_at: expiresAt,
+    });
+
+    if (dbError) {
+      console.error("Erro ao registrar token do Telegram no Supabase:", dbError);
+      return NextResponse.json(
+        { error: "Falha ao registrar token de vinculação no banco de dados." },
+        { status: 500 }
+      );
     }
 
     const linkUrl = `https://t.me/${botUsername}?start=${token}`;
@@ -36,6 +49,7 @@ export async function POST() {
       bot_username: botUsername,
     });
   } catch (error: any) {
+    console.error("Erro interno ao gerar token do Telegram:", error);
     return NextResponse.json(
       { error: error?.message || "Internal server error" },
       { status: 500 }
