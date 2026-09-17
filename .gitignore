@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Node / Next.js / Frontend
+node_modules/
+apps/*/node_modules/
+.next/
+apps/*/.next/
+out/
+apps/*/out/
+*.tsbuildinfo
+.vercel/
+
+# Database & runtime data
+data/*.db
+data/*.sqlite3
+data/*.log
+!data/.gitkeep
+
+# Environment variables & secrets
+.env
+.env.local
+.env*.local
+apps/*/.env*.local
+services/*/.env*.local
+*.env
+*.env.local
+*.env.*.local
+!.env.example
+!apps/*/.env.example
+!services/*/.env.example
+
+# Testing & coverage
+.pytest_cache/
+apps/*/.pytest_cache/
+services/*/.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Supabase
+.supabase/
+!supabase/config.toml
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE & Editor temporary files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

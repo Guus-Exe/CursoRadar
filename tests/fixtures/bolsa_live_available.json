@@ -1,0 +1,13 @@
+{
+  "DATA": [
+    {
+      "ROWNUM": 1,
+      "BOTAO_BOLSA": true,
+      "LISTA_ESPERA": false,
+      "TEM_VAGA_BOLSA": true,
+      "DATA_ABERTURA": "2026-08-25T12:00:00-03:00",
+      "COD_EVENTO": "9900357333",
+      "VAGAS_PARA_BOLSA": 10
+    }
+  ]
+}

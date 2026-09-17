@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<root available-locales="pt_BR" default-locale="pt_BR" version="1.0">
+  <dynamic-element name="codigoOferta" type="text">
+    <dynamic-content language-id="pt_BR"><![CDATA[9900357333]]></dynamic-content>
+  </dynamic-element>
+  <dynamic-element name="periodoDiaOferta" type="text">
+    <dynamic-content language-id="pt_BR"><![CDATA[NO]]></dynamic-content>
+  </dynamic-element>
+  <dynamic-element name="horariosAllOferta" type="text">
+    <dynamic-content language-id="pt_BR"><![CDATA[Seg a Sex das 19h às 22h30]]></dynamic-content>
+  </dynamic-element>
+  <dynamic-element name="dataInicioOferta" type="date">
+    <dynamic-content language-id="pt_BR"><![CDATA[2026-09-14]]></dynamic-content>
+  </dynamic-element>
+  <dynamic-element name="dataFimOferta" type="date">
+    <dynamic-content language-id="pt_BR"><![CDATA[2027-09-01]]></dynamic-content>
+  </dynamic-element>
+  <dynamic-element name="vagasParaCompraOferta" type="boolean">
+    <dynamic-content language-id="pt_BR"><![CDATA[false]]></dynamic-content>
+  </dynamic-element>
+  <dynamic-element name="botaoCompraOferta" type="boolean">
+    <dynamic-content language-id="pt_BR"><![CDATA[true]]></dynamic-content>
+  </dynamic-element>
+  <dynamic-element name="vagasBolsaOferta" type="boolean">
+    <dynamic-content language-id="pt_BR"><![CDATA[true]]></dynamic-content>
+  </dynamic-element>
+  <dynamic-element name="botaoBolsaOferta" type="boolean">
+    <dynamic-content language-id="pt_BR"><![CDATA[true]]></dynamic-content>
+  </dynamic-element>
+</root>
