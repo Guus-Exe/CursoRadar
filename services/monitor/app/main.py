@@ -10,6 +10,7 @@ from app.monitor import CourseMonitor
 from app.notifications.telegram import TelegramProvider
 from app.notifications.whatsapp import WhatsAppProvider
 from app.scrapers.senac import SenacScraper
+from app.telegram_link import TelegramLinkManager
 from app.utils.logger import logger
 
 
@@ -30,10 +31,17 @@ async def run_application() -> None:
     # Scraper
     scraper = SenacScraper()
 
+    # Link Manager (Supabase persistence with in-memory fallback)
+    link_manager = TelegramLinkManager(
+        supabase_url=settings.supabase_url,
+        supabase_service_role_key=settings.supabase_service_role_key,
+    )
+
     # Providers
     telegram_provider = TelegramProvider(
         bot_token=settings.telegram_bot_token,
         chat_id=settings.telegram_chat_id,
+        link_manager=link_manager,
     )
     whatsapp_provider = WhatsAppProvider()
 

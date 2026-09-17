@@ -47,6 +47,18 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
 
+    # Supabase (Backend Multi-usuário)
+    supabase_url: Optional[str] = Field(
+        default=None,
+        description="URL do projeto Supabase",
+        alias="SUPABASE_URL",
+    )
+    supabase_service_role_key: Optional[str] = Field(
+        default=None,
+        description="Chave Service Role privada do Supabase para acesso backend",
+        alias="SUPABASE_SERVICE_ROLE_KEY",
+    )
+
     # Monitored Course and Offer
     senac_offer_url: str = Field(
         default="https://www.sp.senac.br/senac-lapa-faustolo/cursos-tecnicos/curso-tecnico-em-modelagem-do-vestuario?bolsa=true&oferta=9900357333",

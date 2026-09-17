@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project definition files
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md uv.lock* ./
 
 # Install dependencies using uv
 RUN uv sync --no-dev

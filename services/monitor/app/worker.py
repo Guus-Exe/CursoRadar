@@ -46,8 +46,15 @@ class CourseWorker:
         else:
             self.provider = next(iter(self.registry.list_providers()), None)
 
-        self.link_manager = link_manager or TelegramLinkManager()
-        self.telegram_provider = telegram_provider or TelegramProvider(link_manager=self.link_manager)
+        self.link_manager = link_manager or TelegramLinkManager(
+            supabase_url=self.settings.supabase_url,
+            supabase_service_role_key=self.settings.supabase_service_role_key,
+        )
+        self.telegram_provider = telegram_provider or TelegramProvider(
+            bot_token=self.settings.telegram_bot_token,
+            chat_id=self.settings.telegram_chat_id,
+            link_manager=self.link_manager,
+        )
         self.matching_engine = matching_engine or MatchingEngine(registry=self.registry)
         self.scheduler = AsyncIOScheduler()
         self._lock = asyncio.Lock()
@@ -63,9 +70,22 @@ class CourseWorker:
     def register_monitor(self, monitor: UserMonitor) -> None:
         """Registers or updates a user monitor in memory."""
         self.active_monitors = [m for m in self.active_monitors if m.id != monitor.id]
+        if not monitor.telegram_chat_id and self.link_manager:
+            chat_id = self.link_manager.get_chat_id_by_user(monitor.user_id)
+            if chat_id:
+                monitor.telegram_chat_id = chat_id
         if monitor.active:
             self.active_monitors.append(monitor)
             logger.info(f"Monitor {monitor.id} registrado para usuário {monitor.user_id}.")
+
+    def _ensure_monitors_telegram(self) -> None:
+        """Hydrates telegram_chat_id from Supabase for any active monitors lacking it."""
+        if self.link_manager:
+            for mon in self.active_monitors:
+                if not mon.telegram_chat_id:
+                    chat_id = self.link_manager.get_chat_id_by_user(mon.user_id)
+                    if chat_id:
+                        mon.telegram_chat_id = chat_id
 
     async def run_check_cycle(self) -> Dict[str, Any]:
         """Executes a full verification cycle across all tracked offers and active providers."""
@@ -130,6 +150,7 @@ class CourseWorker:
                         )
 
                         # Execute matching against all active user monitors
+                        self._ensure_monitors_telegram()
                         matches = self.matching_engine.match(event, self.active_monitors)
 
                         # Dispatch personalized alerts
@@ -269,6 +290,7 @@ class CourseWorker:
                             current_state=state,
                             url=offer.url,
                         )
+                        self._ensure_monitors_telegram()
                         matches = self.matching_engine.match(event, self.active_monitors)
                         for match in matches:
                             if self.db.is_duplicate_alert(

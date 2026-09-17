@@ -87,7 +87,7 @@ class TelegramProvider(NotificationProvider):
             buttons_section = f"\n🔘 Botões disponíveis: {', '.join(curr.botoes)}"
 
         msg = (
-            f"🚨 VAGA ENCONTRADA — SENAC\n\n"
+            f"🚨 VAGA ENCONTRADA — CURSORADAR\n\n"
             f"Curso: {curr.curso}\n"
             f"Unidade: {curr.unidade}\n"
             f"Período: {curr.turno}\n\n"
@@ -100,7 +100,17 @@ class TelegramProvider(NotificationProvider):
             f"Link:\n{url}"
         )
 
-        return await self.send_message(msg)
+        sent_any = False
+        if self.link_manager:
+            for acc in self.link_manager.list_active_accounts():
+                if await self.send_to_user(acc.telegram_chat_id, msg):
+                    sent_any = True
+
+        if self.chat_id:
+            if await self.send_to_user(self.chat_id, msg):
+                sent_any = True
+
+        return sent_any
 
     async def send_new_offer_alert(self, offer: DiscoveredOffer) -> bool:
         """Sends formatted alert when a new offer is discovered for the course."""
@@ -120,7 +130,17 @@ class TelegramProvider(NotificationProvider):
             f"Link:\n{offer.url}"
         )
 
-        return await self.send_message(msg)
+        sent_any = False
+        if self.link_manager:
+            for acc in self.link_manager.list_active_accounts():
+                if await self.send_to_user(acc.telegram_chat_id, msg):
+                    sent_any = True
+
+        if self.chat_id:
+            if await self.send_to_user(self.chat_id, msg):
+                sent_any = True
+
+        return sent_any
 
     async def send_health_alert(self, consecutive_failures: int, details: Optional[str] = None) -> bool:
         """Sends warning message about repeated connection failures."""
@@ -135,7 +155,17 @@ class TelegramProvider(NotificationProvider):
             f"O monitor continuará tentando se recuperar automaticamente."
         )
 
-        return await self.send_message(msg)
+        sent_any = False
+        if self.link_manager:
+            for acc in self.link_manager.list_active_accounts():
+                if await self.send_to_user(acc.telegram_chat_id, msg):
+                    sent_any = True
+
+        if self.chat_id:
+            if await self.send_to_user(self.chat_id, msg):
+                sent_any = True
+
+        return sent_any
 
     def create_application(
         self,
@@ -157,22 +187,26 @@ class TelegramProvider(NotificationProvider):
                 return
 
             # Check if token argument was passed: /start <TOKEN>
-            if context.args and len(context.args) > 0 and self.link_manager:
+            if context.args and len(context.args) > 0:
                 token_arg = context.args[0].strip()
                 chat = update.effective_chat
                 user = update.effective_user
-                if chat and user:
+
+                if not self.link_manager:
+                    await update.message.reply_text("❌ Sistema de vinculação temporariamente indisponível.")
+                    return
+
+                if chat:
                     success, message, account = self.link_manager.validate_and_consume(
                         token_str=token_arg,
                         telegram_chat_id=str(chat.id),
-                        telegram_username=user.username,
-                        telegram_first_name=user.first_name,
+                        telegram_username=user.username if user else None,
+                        telegram_first_name=user.first_name if user else None,
                     )
                     if success:
                         resp = (
-                            f"🎉 Conta vinculada com sucesso!\n\n"
-                            f"Olá, {user.first_name or 'usuário'}! Seu Telegram foi conectado ao seu painel Senac Monitor.\n"
-                            f"Você receberá aqui instantaneamente os alertas das oportunidades que cadastrar.\n\n"
+                            f"{message}\n\n"
+                            f"Olá, {user.first_name or 'usuário'}! Você receberá aqui instantaneamente os alertas das oportunidades que cadastrar no CursoRadar.\n\n"
                             f"Comandos úteis:\n"
                             f"/status - Ver resumo de verificações\n"
                             f"/check - Executar verificação manual imediata\n"
@@ -181,13 +215,13 @@ class TelegramProvider(NotificationProvider):
                         await update.message.reply_text(resp)
                         return
                     else:
-                        await update.message.reply_text(f"⚠️ {message}")
+                        await update.message.reply_text(message)
                         return
 
             text = (
-                "👋 Olá! Sou o Bot Monitor de Vagas do Senac SP.\n\n"
-                "Para vincular sua conta e receber alertas personalizados:\n"
-                "1. Acesse seu painel web do Senac Monitor\n"
+                "👋 Olá! Sou o Bot do CursoRadar.\n\n"
+                "Para vincular sua conta e receber alertas de vagas e bolsas:\n"
+                "1. Acesse seu painel web do CursoRadar\n"
                 "2. Vá em Configurações > Telegram\n"
                 "3. Clique em 'Conectar Telegram'\n\n"
                 "Comandos disponíveis:\n"
@@ -195,7 +229,7 @@ class TelegramProvider(NotificationProvider):
                 "/check - Executa uma verificação manual imediata\n"
                 "/link - Retorna o link monitorado\n"
                 "/pause - Pausa o monitoramento periódico\n"
-                "/resume - Retoma o monitoramento periódico\n"
+                "/resume - Retoma o monitoramento periódico"
             )
             await update.message.reply_text(text)
 

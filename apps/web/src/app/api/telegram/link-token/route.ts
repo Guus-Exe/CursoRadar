@@ -22,7 +22,7 @@ export async function POST() {
     const token = crypto.randomBytes(24).toString("hex");
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
     const botUsername =
-      process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME || "CursoRadarAlertsBot";
+      process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME || "Curso_Radar_Bot";
 
     // 3. Persistência estrita no schema public.telegram_link_tokens do Supabase
     const { error: dbError } = await supabase.from("telegram_link_tokens").insert({
