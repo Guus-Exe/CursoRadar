@@ -1,7 +1,7 @@
 [project]
-name = "senac-monitor"
+name = "cursoradar-worker"
 version = "0.1.0"
-description = "Monitor automatizado de vagas e bolsas em cursos do Senac SP com alertas no Telegram"
+description = "CursoRadar Worker - Monitor contínuo e inteligente de vagas e bolsas"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

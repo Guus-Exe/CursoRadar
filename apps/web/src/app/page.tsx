@@ -10,10 +10,10 @@ export default function HomePage() {
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-6">
           <div className="flex items-center space-x-2">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 text-white font-bold text-xl">
-              S
+              C
             </div>
             <span className="text-xl font-bold tracking-tight text-slate-900">
-              Senac Monitor
+              CursoRadar
             </span>
           </div>
           <div className="flex items-center space-x-3">
@@ -90,7 +90,7 @@ export default function HomePage() {
 
       {/* Footer */}
       <footer className="border-t border-slate-200 bg-slate-50 py-6 text-center text-xs text-slate-500">
-        Senac Monitor © 2026. Plataforma independente de acompanhamento de oportunidades públicas.
+        CursoRadar © 2026. Plataforma independente de acompanhamento de oportunidades públicas.
       </footer>
     </div>
   );

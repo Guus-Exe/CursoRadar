@@ -84,7 +84,7 @@ export default function TelegramSettingsPage() {
                 Status da Conexão
               </CardTitle>
               <CardDescription>
-                Estado atual do vínculo com o bot oficial do Senac Monitor
+                Estado atual do vínculo com o bot oficial do CursoRadar
               </CardDescription>
             </div>
             {account ? (

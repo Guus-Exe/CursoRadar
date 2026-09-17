@@ -65,9 +65,9 @@ export function Sidebar({ isAdmin = false, mobileOpen = false, onClose }: Sideba
         <div className="flex h-16 items-center border-b border-slate-200 px-6">
           <Link href={isAdmin ? "/admin" : "/dashboard"} className="flex items-center gap-2 font-bold text-slate-900">
             <div className={cn("flex h-8 w-8 items-center justify-center rounded-lg text-white font-bold", isAdmin ? "bg-purple-600" : "bg-blue-600")}>
-              {isAdmin ? "A" : "S"}
+              {isAdmin ? "A" : "C"}
             </div>
-            <span>{isAdmin ? "Painel Admin" : "Senac Monitor"}</span>
+            <span>{isAdmin ? "Painel Admin" : "CursoRadar"}</span>
           </Link>
         </div>
 

@@ -1,12 +1,12 @@
 services:
   postgres:
     image: postgres:15-alpine
-    container_name: senac-postgres
+    container_name: cursoradar-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-senac_monitor}
+      POSTGRES_DB: ${POSTGRES_DB:-cursoradar}
     ports:
       - "5432:5432"
     volumes:
@@ -17,14 +17,14 @@ services:
     build:
       context: ./services/monitor
       dockerfile: Dockerfile
-    container_name: senac-monitor-worker
+    container_name: cursoradar-worker
     restart: unless-stopped
     depends_on:
       - postgres
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-senac_monitor}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-cursoradar}
     logging:
       driver: "json-file"
       options:
@@ -35,7 +35,7 @@ services:
     build:
       context: ./apps/web
       dockerfile: Dockerfile
-    container_name: senac-web
+    container_name: cursoradar-web
     restart: unless-stopped
     ports:
       - "3000:3000"

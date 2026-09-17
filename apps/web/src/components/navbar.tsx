@@ -11,7 +11,7 @@ export function Navbar({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   const [user, setUser] = useState<{ email?: string; role?: string } | null>(null);
 
   useEffect(() => {
-    const raw = localStorage.getItem("senac_monitor_user");
+    const raw = localStorage.getItem("cursoradar_user") || localStorage.getItem("senac_monitor_user");
     if (raw) {
       try {
         setUser(JSON.parse(raw));
@@ -20,6 +20,7 @@ export function Navbar({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   }, []);
 
   function handleLogout() {
+    localStorage.removeItem("cursoradar_user");
     localStorage.removeItem("senac_monitor_user");
     router.push("/login");
   }
@@ -37,10 +38,10 @@ export function Navbar({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
         )}
         <Link href="/dashboard" className="flex items-center gap-2">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-600 font-bold text-white">
-            S
+            C
           </div>
           <span className="font-bold tracking-tight text-slate-900 hidden sm:inline">
-            Senac Monitor
+            CursoRadar
           </span>
         </Link>
       </div>

@@ -21,7 +21,7 @@ interface UserProfile {
 const INITIAL_USERS: UserProfile[] = [
   {
     id: "usr-01",
-    email: "admin@senacmonitor.local",
+    email: "admin@cursoradar.local",
     full_name: "Administrador do Sistema",
     role: "admin",
     telegram_connected: true,

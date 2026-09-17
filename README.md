@@ -1,4 +1,4 @@
-# 🎓 Senac Monitor — Plataforma Multi-Usuário de Vagas e Bolsas
+# 🎓 CursoRadar — Plataforma Multi-Usuário de Vagas e Bolsas
 
 Plataforma completa e moderna para monitoramento contínuo e inteligente de **vagas regulares, bolsas de estudo (PSG 100% gratuitas), lista de espera e abertura de novas turmas** em instituições de ensino, com foco nativo no **Senac São Paulo**.
 
@@ -18,7 +18,7 @@ A plataforma evoluiu de um script single-user local para uma arquitetura distrib
 
 ```
                         ┌──────────────────────────────────────────┐
-                        │             Senac Monitor Web            │
+                        │             CursoRadar Web               │
                         │    (Next.js 15 / Tailwind / React 19)    │
                         └──────────────┬───────────────────────────┘
                                        │ Supabase Client & RLS
@@ -48,7 +48,7 @@ A plataforma evoluiu de um script single-user local para uma arquitetura distrib
 ### Estrutura do Repositório
 
 ```
-silly-volta/
+CursoRadar/
 ├── apps/
 │   └── web/                     # Aplicação Next.js 15 App Router
 │       ├── src/app/             # Rotas: /, /login, /register, /dashboard, /admin
@@ -125,9 +125,9 @@ O projeto possui **34 testes automatizados em Python** cobrindo todas as camadas
 - **Health Heartbeat:** Telemetria contínua dos workers e registro automático de incidentes na tabela `system_errors`.
 - **Testes Históricos Legados:** 17 testes de regressão preservados e validados.
 
-Para rodar todos os testes de backend:
+Para rodar todos os testes de backend (da raiz ou da pasta do worker):
 ```bash
-uv run pytest services/monitor/tests -v
+uv run pytest -v
 ```
 
 Para verificar o build e tipos do frontend Next.js:

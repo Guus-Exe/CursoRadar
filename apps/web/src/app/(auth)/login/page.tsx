@@ -31,7 +31,7 @@ export default function LoginPage() {
       if (signInError) {
         // Fallback for local dev/demo environment without live Supabase cloud
         if (email.includes("@") && password.length >= 6) {
-          localStorage.setItem("senac_monitor_user", JSON.stringify({ email, role: email.startsWith("admin") ? "admin" : "user" }));
+          localStorage.setItem("cursoradar_user", JSON.stringify({ email, role: email.startsWith("admin") ? "admin" : "user" }));
           router.push(email.startsWith("admin") ? "/admin" : "/dashboard");
           return;
         }
@@ -43,7 +43,7 @@ export default function LoginPage() {
     } catch (err: any) {
       // Local demo fallback
       if (email && password) {
-        localStorage.setItem("senac_monitor_user", JSON.stringify({ email, role: email.startsWith("admin") ? "admin" : "user" }));
+        localStorage.setItem("cursoradar_user", JSON.stringify({ email, role: email.startsWith("admin") ? "admin" : "user" }));
         router.push(email.startsWith("admin") ? "/admin" : "/dashboard");
         return;
       }
@@ -54,8 +54,8 @@ export default function LoginPage() {
   }
 
   function handleDemoUser(role: "user" | "admin") {
-    const demoEmail = role === "admin" ? "admin@senacmonitor.com" : "usuario@exemplo.com";
-    localStorage.setItem("senac_monitor_user", JSON.stringify({ email: demoEmail, role }));
+    const demoEmail = role === "admin" ? "admin@cursoradar.com" : "usuario@exemplo.com";
+    localStorage.setItem("cursoradar_user", JSON.stringify({ email: demoEmail, role }));
     router.push(role === "admin" ? "/admin" : "/dashboard");
   }
 
@@ -64,7 +64,7 @@ export default function LoginPage() {
       <Card className="w-full max-w-md">
         <CardHeader className="space-y-1 text-center">
           <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-blue-600 text-white font-bold text-2xl mb-2">
-            S
+            C
           </div>
           <CardTitle className="text-2xl font-bold">Acessar Plataforma</CardTitle>
           <CardDescription>

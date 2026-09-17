@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Senac Monitor — Plataforma de Vagas e Bolsas",
-  description: "Monitoramento automatizado multiusuário de vagas, bolsas de estudo e novas turmas no Senac SP",
+  title: "CursoRadar — Plataforma de Vagas e Bolsas",
+  description: "Monitoramento automatizado multiusuário de vagas, bolsas de estudo e novas turmas no Senac SP e instituições de ensino",
 };
 
 export default function RootLayout({

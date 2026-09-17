@@ -72,6 +72,40 @@ wheels = [
 ]
 
 [[package]]
+name = "cursoradar-monorepo"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "apscheduler" },
+    { name = "beautifulsoup4" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-telegram-bot" },
+    { name = "sqlalchemy" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "apscheduler", specifier = ">=3.10.4" },
+    { name = "beautifulsoup4", specifier = ">=4.12.3" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pydantic", specifier = ">=2.10.4" },
+    { name = "pydantic-settings", specifier = ">=2.7.1" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.25.0" },
+    { name = "python-telegram-bot", specifier = ">=21.9" },
+    { name = "sqlalchemy", specifier = ">=2.0.36" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "greenlet"
 version = "3.5.6"
 source = { registry = "https://pypi.org/simple" }
@@ -397,40 +431,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/ba/77/153517bb1ac1bba67
 wheels = [
     { url = "https://files.pythonhosted.org/packages/60/7c/ed7d4dd94280bd434173cae9f7a7aedaaab9af128ae4f494423a5687c820/python_telegram_bot-22.8-py3-none-any.whl", hash = "sha256:42373918097f1b837cc4e717d588c19ea79651497ec712bb5b0c76e5e63c50e1", size = 769397, upload-time = "2026-06-12T08:10:27.066Z" },
 ]
-
-[[package]]
-name = "senac-monitor"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "apscheduler" },
-    { name = "beautifulsoup4" },
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "python-telegram-bot" },
-    { name = "sqlalchemy" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "apscheduler", specifier = ">=3.10.4" },
-    { name = "beautifulsoup4", specifier = ">=4.12.3" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "pydantic", specifier = ">=2.10.4" },
-    { name = "pydantic-settings", specifier = ">=2.7.1" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.25.0" },
-    { name = "python-telegram-bot", specifier = ">=21.9" },
-    { name = "sqlalchemy", specifier = ">=2.0.36" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "soupsieve"

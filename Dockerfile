@@ -24,11 +24,7 @@ COPY pyproject.toml README.md ./
 RUN uv sync --no-dev
 
 # Copy application source code
-COPY app/ ./app/
-COPY data/ ./data/
-
-# Mount volume for persistent SQLite database
-VOLUME ["/app/data"]
+COPY services/monitor/app/ ./services/monitor/app/
 
 # Run the monitoring service
 CMD ["uv", "run", "python", "-m", "app.main"]

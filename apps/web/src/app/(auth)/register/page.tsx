@@ -38,7 +38,7 @@ export default function RegisterPage() {
       if (signUpError) {
         // Fallback for local demo environment without live Supabase cloud
         localStorage.setItem(
-          "senac_monitor_user",
+          "cursoradar_user",
           JSON.stringify({ email, name, role: "user" })
         );
         router.push("/dashboard");
@@ -48,7 +48,7 @@ export default function RegisterPage() {
       router.push("/dashboard");
     } catch (err: any) {
       localStorage.setItem(
-        "senac_monitor_user",
+        "cursoradar_user",
         JSON.stringify({ email, name, role: "user" })
       );
       router.push("/dashboard");
@@ -62,7 +62,7 @@ export default function RegisterPage() {
       <Card className="w-full max-w-md">
         <CardHeader className="space-y-1 text-center">
           <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-blue-600 text-white font-bold text-2xl mb-2">
-            S
+            C
           </div>
           <CardTitle className="text-2xl font-bold">Criar Conta</CardTitle>
           <CardDescription>
