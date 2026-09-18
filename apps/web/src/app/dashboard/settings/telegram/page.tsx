@@ -1,22 +1,25 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Send, CheckCircle2, Copy, ExternalLink, ShieldAlert, RefreshCw, KeyRound, AlertTriangle } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 interface TelegramAccount {
-  telegram_chat_id: number;
+  id: string;
+  telegram_chat_id: string;
   telegram_username: string | null;
-  first_name: string | null;
-  is_active: boolean;
-  linked_at: string;
+  telegram_first_name: string | null;
+  active: boolean;
+  verified_at: string;
 }
 
 export default function TelegramSettingsPage() {
   const [account, setAccount] = useState<TelegramAccount | null>(null);
   const [loading, setLoading] = useState(false);
+  const [fetchingAccount, setFetchingAccount] = useState(true);
   const [tokenData, setTokenData] = useState<{
     token: string;
     link_url: string;
@@ -25,6 +28,85 @@ export default function TelegramSettingsPage() {
   } | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const fetchTelegramAccount = useCallback(async () => {
+    try {
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        setAccount(null);
+        return null;
+      }
+
+      const { data, error: fetchError } = await supabase
+        .from("telegram_accounts")
+        .select("id, telegram_chat_id, telegram_username, telegram_first_name, active, verified_at")
+        .eq("user_id", user.id)
+        .eq("active", true)
+        .maybeSingle();
+
+      if (fetchError) {
+        console.error("Erro ao buscar conta do Telegram:", fetchError);
+        return null;
+      }
+
+      if (data) {
+        const acc: TelegramAccount = {
+          id: data.id,
+          telegram_chat_id: String(data.telegram_chat_id),
+          telegram_username: data.telegram_username,
+          telegram_first_name: data.telegram_first_name,
+          active: data.active,
+          verified_at: data.verified_at,
+        };
+        setAccount(acc);
+        return acc;
+      } else {
+        setAccount(null);
+        return null;
+      }
+    } catch (err) {
+      console.error("Erro inesperado ao consultar Telegram:", err);
+      return null;
+    } finally {
+      setFetchingAccount(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchTelegramAccount();
+  }, [fetchTelegramAccount]);
+
+  // Polling enquanto houver token ativo e nenhuma conta vinculada detectada ainda
+  useEffect(() => {
+    if (tokenData && !account) {
+      pollTimerRef.current = setInterval(async () => {
+        const found = await fetchTelegramAccount();
+        if (found) {
+          setTokenData(null);
+          if (pollTimerRef.current) {
+            clearInterval(pollTimerRef.current);
+            pollTimerRef.current = null;
+          }
+        }
+      }, 3000);
+    } else {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    }
+
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+      }
+    };
+  }, [tokenData, account, fetchTelegramAccount]);
 
   async function handleGenerateToken() {
     setLoading(true);
@@ -48,21 +130,33 @@ export default function TelegramSettingsPage() {
     setTimeout(() => setCopied(false), 2500);
   }
 
-  function handleSimulateConnect() {
-    // For local demo/preview without running telegram bot
-    setAccount({
-      telegram_chat_id: 987654321,
-      telegram_username: "usuario_aluno",
-      first_name: "Aluno",
-      is_active: true,
-      linked_at: new Date().toISOString(),
-    });
-    setTokenData(null);
-  }
+  async function handleDisconnect() {
+    setLoading(true);
+    setError(null);
+    try {
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
-  function handleDisconnect() {
-    setAccount(null);
-    setTokenData(null);
+      if (!user) throw new Error("Usuário não autenticado");
+
+      const { error: delError } = await supabase
+        .from("telegram_accounts")
+        .delete()
+        .eq("user_id", user.id);
+
+      if (delError) {
+        throw new Error(delError.message);
+      }
+
+      setAccount(null);
+      setTokenData(null);
+    } catch (err: any) {
+      setError(err.message || "Erro ao desconectar conta do Telegram.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
@@ -87,7 +181,11 @@ export default function TelegramSettingsPage() {
                 Estado atual do vínculo com o bot oficial do CursoRadar
               </CardDescription>
             </div>
-            {account ? (
+            {fetchingAccount ? (
+              <Badge variant="outline" className="text-slate-500 border-slate-200 text-sm px-3 py-1">
+                <RefreshCw className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Verificando...
+              </Badge>
+            ) : account ? (
               <Badge className="bg-emerald-100 text-emerald-800 border-emerald-200 text-sm px-3 py-1">
                 <CheckCircle2 className="h-4 w-4 mr-1.5 inline" /> Conectado
               </Badge>
@@ -99,13 +197,18 @@ export default function TelegramSettingsPage() {
           </div>
         </CardHeader>
         <CardContent>
-          {account ? (
+          {fetchingAccount ? (
+            <div className="py-12 text-center text-slate-500 text-sm">
+              <RefreshCw className="h-6 w-6 animate-spin mx-auto mb-2 text-slate-400" />
+              Carregando dados da integração...
+            </div>
+          ) : account ? (
             <div className="rounded-lg bg-slate-50 border border-slate-200 p-5 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                   <div className="text-xs font-medium text-slate-500 uppercase tracking-wider">Usuário Telegram</div>
                   <div className="text-sm font-semibold text-slate-900 mt-0.5">
-                    @{account.telegram_username || "Privado"} ({account.first_name})
+                    @{account.telegram_username || "Privado"} {account.telegram_first_name ? `(${account.telegram_first_name})` : ""}
                   </div>
                 </div>
                 <div>
@@ -117,7 +220,7 @@ export default function TelegramSettingsPage() {
                 <div>
                   <div className="text-xs font-medium text-slate-500 uppercase tracking-wider">Conectado em</div>
                   <div className="text-sm font-semibold text-slate-900 mt-0.5">
-                    {new Date(account.linked_at).toLocaleDateString("pt-BR", {
+                    {new Date(account.verified_at).toLocaleDateString("pt-BR", {
                       day: "2-digit",
                       month: "short",
                       year: "numeric",
@@ -130,8 +233,14 @@ export default function TelegramSettingsPage() {
 
               <div className="pt-3 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">
                 <span>Alertas prioritários ativos para este canal.</span>
-                <Button variant="outline" size="sm" onClick={handleDisconnect} className="text-rose-600 hover:text-rose-700 hover:bg-rose-50 border-rose-200">
-                  Desconectar Telegram
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDisconnect}
+                  disabled={loading}
+                  className="text-rose-600 hover:text-rose-700 hover:bg-rose-50 border-rose-200"
+                >
+                  {loading ? "Desconectando..." : "Desconectar Telegram"}
                 </Button>
               </div>
             </div>
@@ -169,7 +278,7 @@ export default function TelegramSettingsPage() {
                       <KeyRound className="h-4 w-4" /> Token de Vinculação Ativo
                     </span>
                     <span className="text-xs text-slate-400">
-                      Válido por 15 minutos
+                      Válido por 15 minutos • Aguardando ativação no Telegram...
                     </span>
                   </div>
 
@@ -188,33 +297,26 @@ export default function TelegramSettingsPage() {
                     </Button>
                   </div>
 
-                  <div className="flex flex-col sm:flex-row gap-3 pt-2">
+                  <div className="pt-2">
                     <a
                       href={tokenData.link_url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex-1"
+                      className="block"
                     >
                       <Button className="w-full bg-sky-500 hover:bg-sky-400 text-white font-medium">
                         <ExternalLink className="h-4 w-4 mr-2" />
                         Abrir Direto no Telegram
                       </Button>
                     </a>
-                    <Button
-                      variant="outline"
-                      onClick={handleSimulateConnect}
-                      className="bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700"
-                    >
-                      Simular Conexão (Demo)
-                    </Button>
                   </div>
                 </div>
               ) : (
-                <div className="flex flex-col sm:flex-row gap-3">
+                <div>
                   <Button
                     onClick={handleGenerateToken}
                     disabled={loading}
-                    className="bg-sky-600 hover:bg-sky-700 text-white flex-1"
+                    className="bg-sky-600 hover:bg-sky-700 text-white w-full sm:w-auto"
                   >
                     {loading ? (
                       <>
@@ -227,13 +329,6 @@ export default function TelegramSettingsPage() {
                         Gerar Link de Conexão com Telegram
                       </>
                     )}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={handleSimulateConnect}
-                    className="border-slate-300 text-slate-700 hover:bg-slate-100"
-                  >
-                    Simular Conectado
                   </Button>
                 </div>
               )}

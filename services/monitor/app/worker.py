@@ -1,9 +1,10 @@
 """Multi-User Course Worker Orchestrator with Heartbeat and Deduplication."""
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 from typing import Any, Dict, List, Optional, Set
+import uuid
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import Settings, get_settings
 from app.database import Database
@@ -134,6 +135,45 @@ class CourseWorker:
     def _ensure_monitors_telegram(self) -> None:
         """Hydrates telegram_chat_id from Supabase for any active monitors lacking it."""
         self._hydrate_monitors_telegram(self.active_monitors)
+
+    async def _persist_supabase_alert(self, match: MatchResult) -> None:
+        """Persists the sent alert to Supabase public.alerts table using service_role."""
+        try:
+            supabase = getattr(self.monitor_repo, "supabase", None) or (
+                getattr(self.link_manager, "supabase", None) if self.link_manager else None
+            )
+            if not supabase:
+                return
+
+            def is_valid_uuid(val: Optional[str]) -> bool:
+                if not val:
+                    return False
+                try:
+                    uuid.UUID(str(val))
+                    return True
+                except (ValueError, TypeError):
+                    return False
+
+            payload: Dict[str, Any] = {
+                "user_id": match.user_id,
+                "monitor_id": match.monitor_id,
+                "alert_type": match.change_type,
+                "fingerprint": match.fingerprint,
+                "channel": "telegram",
+                "delivered": True,
+                "message_content": match.message,
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if is_valid_uuid(match.offer_id):
+                payload["offer_id"] = match.offer_id
+
+            supabase.table("alerts").upsert(payload, on_conflict="fingerprint").execute()
+            logger.info(
+                f"[alert] Alerta persistido no Supabase para user={match.user_id} "
+                f"monitor={match.monitor_id} fp={match.fingerprint[:8]}"
+            )
+        except Exception as err:
+            logger.error(f"[alert] Falha ao persistir alerta no Supabase: {err}")
 
     async def sync_monitors_from_supabase(self) -> List[UserMonitor]:
         """Synchronizes active monitors from Supabase with a last-known-good cache strategy."""
@@ -522,19 +562,24 @@ class CourseWorker:
                         elif not (previous_state and previous_state.bolsa_disponivel) and current_state.bolsa_disponivel:
                             change_type = "SCHOLARSHIP_OPEN"
 
+                        is_modelagem = "modelagem" in (current_state.curso or "").lower()
                         event = OfferChangeEvent(
                             offer_id=target_offer_id,
                             provider_slug=p_slug,
                             institution_name=p_instance.name,
                             institution_id="11111111-1111-1111-1111-111111111111",
                             location_id="22222222-2222-2222-2222-222222222221",
-                            course_id="33333333-3333-3333-3333-333333333331",
+                            course_id="33333333-3333-3333-3333-333333333331" if is_modelagem else None,
+                            title=current_state.curso,
+                            city=current_state.unidade,
                             shift=current_state.turno,
                             change_type=change_type,
                             reasons=diff.reasons,
                             previous_state=previous_state,
                             current_state=current_state,
                             url=target_url,
+                            bolsa_disponivel=current_state.bolsa_disponivel,
+                            inscricao_disponivel=current_state.inscricao_disponivel,
                         )
 
                         # Execute matching against all active user monitors
@@ -550,7 +595,7 @@ class CourseWorker:
                                 channel="telegram",
                                 fingerprint=match.fingerprint,
                             ):
-                                logger.debug(f"Alerta já enviado no banco para {match.fingerprint}")
+                                logger.debug(f"[alert] Alerta já enviado no banco para {match.fingerprint}")
                                 continue
 
                             sent = await self.telegram_provider.send_to_user(
@@ -559,6 +604,10 @@ class CourseWorker:
                             )
                             if sent:
                                 alerts_sent += 1
+                                logger.info(
+                                    f"[telegram] Alerta enviado para chat={match.telegram_chat_id} "
+                                    f"user={match.user_id} monitor={match.monitor_id}"
+                                )
                                 self.db.record_alert(
                                     alert_type=match.change_type,
                                     offer_id=match.offer_id,
@@ -569,6 +618,7 @@ class CourseWorker:
                                     monitor_id=match.monitor_id,
                                     fingerprint=match.fingerprint,
                                 )
+                                await self._persist_supabase_alert(match)
 
                     # Persist offer state and check entry
                     self.db.upsert_offer(
@@ -691,18 +741,23 @@ class CourseWorker:
                                 inscricao_disponivel=offer.vagas_disponiveis,
                                 bolsa_disponivel=offer.bolsa_disponivel,
                             )
+                            is_modelagem = "modelagem" in (offer.curso or "").lower()
                             event = OfferChangeEvent(
                                 offer_id=offer.codigo_oferta,
                                 provider_slug=p_slug,
                                 institution_name=p_instance.name,
                                 institution_id="11111111-1111-1111-1111-111111111111",
                                 location_id="22222222-2222-2222-2222-222222222221",
-                                course_id="33333333-3333-3333-3333-333333333331",
+                                course_id="33333333-3333-3333-3333-333333333331" if is_modelagem else None,
+                                title=offer.curso,
+                                city=offer.unidade,
                                 shift=offer.turno,
                                 change_type="NEW_OFFER",
                                 reasons=["Nova turma aberta pela instituição!"],
                                 current_state=state,
                                 url=offer.url,
+                                bolsa_disponivel=offer.bolsa_disponivel,
+                                inscricao_disponivel=offer.vagas_disponiveis,
                             )
                             self._ensure_monitors_telegram()
                             matches = self.matching_engine.match(event, self.active_monitors)
@@ -714,12 +769,17 @@ class CourseWorker:
                                     channel="telegram",
                                     fingerprint=match.fingerprint,
                                 ):
+                                    logger.debug(f"[alert] Alerta de descoberta já enviado no banco para {match.fingerprint}")
                                     continue
                                 sent = await self.telegram_provider.send_to_user(
                                     recipient_id=match.telegram_chat_id,
                                     text=match.message,
                                 )
                                 if sent:
+                                    logger.info(
+                                        f"[telegram] Alerta de nova oferta enviado para chat={match.telegram_chat_id} "
+                                        f"user={match.user_id} monitor={match.monitor_id}"
+                                    )
                                     self.db.record_alert(
                                         alert_type=match.change_type,
                                         offer_id=match.offer_id,
@@ -730,6 +790,7 @@ class CourseWorker:
                                         monitor_id=match.monitor_id,
                                         fingerprint=match.fingerprint,
                                     )
+                                    await self._persist_supabase_alert(match)
 
                     all_discovered.extend(discovered)
                 except Exception as err:

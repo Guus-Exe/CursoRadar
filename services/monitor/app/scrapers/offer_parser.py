@@ -152,9 +152,9 @@ class OfferParser:
         curso = (
             course_meta.get("tituloComercial")
             or course_meta.get("titulo")
-            or "Técnico em Modelagem do Vestuário"
+            or "Curso não informado"
         )
-        unidade = unit_name or "Senac Lapa Faustolo"
+        unidade = unit_name or "Unidade não informada"
         codigo_oferta = str(fields.get("codigoOferta", "")).strip()
 
         # Turno
@@ -278,15 +278,15 @@ class OfferParser:
     def parse_html_offer(
         html: str,
         target_offer_id: Optional[str] = None,
-        default_course: str = "Técnico em Modelagem do Vestuário",
-        default_unit: str = "Senac Lapa Faustolo",
+        default_course: Optional[str] = None,
+        default_unit: Optional[str] = None,
         offer_url: Optional[str] = None,
     ) -> OfferState:
         """Parses HTML document using BeautifulSoup and embedded JS data fallback."""
         soup = BeautifulSoup(html, "html.parser")
 
         # 1. Course title
-        curso = default_course
+        curso = default_course or "Curso não informado"
         title_tag = soup.find("h1") or soup.find("title")
         if title_tag and title_tag.text:
             raw_title = title_tag.text.strip()
@@ -296,7 +296,7 @@ class OfferParser:
                 curso = clean_title
 
         # 2. Unit name
-        unidade = default_unit
+        unidade = default_unit or "Unidade não informada"
         breadcrumb = soup.find(class_=re.compile(r"breadcrumb|caminho", re.I))
         if breadcrumb and "lapa faustolo" in breadcrumb.text.lower():
             unidade = "Senac Lapa Faustolo"

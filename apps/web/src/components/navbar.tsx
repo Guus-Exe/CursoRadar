@@ -2,27 +2,77 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { LogOut, User, ShieldAlert, Bell, Menu } from "lucide-react";
+import { LogOut, ShieldAlert, Bell, Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { createClient } from "@/lib/supabase/client";
 
 export function Navbar({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
-  const router = useRouter();
-  const [user, setUser] = useState<{ email?: string; role?: string } | null>(null);
+  const [user, setUser] = useState<{ email?: string; name?: string | null; role?: string } | null>(null);
 
   useEffect(() => {
-    const raw = localStorage.getItem("cursoradar_user") || localStorage.getItem("senac_monitor_user");
-    if (raw) {
-      try {
-        setUser(JSON.parse(raw));
-      } catch {}
+    const supabase = createClient();
+
+    async function loadUser() {
+      const {
+        data: { user: authUser },
+      } = await supabase.auth.getUser();
+
+      if (!authUser) {
+        setUser(null);
+        return;
+      }
+
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("name, role")
+        .eq("id", authUser.id)
+        .maybeSingle();
+
+      setUser({
+        email: authUser.email,
+        name: profile?.name || authUser.user_metadata?.name || null,
+        role: profile?.role || "user",
+      });
     }
+
+    loadUser();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("name, role")
+          .eq("id", session.user.id)
+          .maybeSingle();
+
+        setUser({
+          email: session.user.email,
+          name: profile?.name || session.user.user_metadata?.name || null,
+          role: profile?.role || "user",
+        });
+      } else {
+        setUser(null);
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
-  function handleLogout() {
-    localStorage.removeItem("cursoradar_user");
-    localStorage.removeItem("senac_monitor_user");
-    router.push("/login");
+  async function handleLogout() {
+    try {
+      const supabase = createClient();
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.error("Erro ao encerrar sessão:", err);
+    } finally {
+      localStorage.removeItem("cursoradar_user");
+      localStorage.removeItem("senac_monitor_user");
+      window.location.href = "/login";
+    }
   }
 
   return (
@@ -64,10 +114,14 @@ export function Navbar({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
         </Link>
 
         <div className="flex items-center gap-2 border-l border-slate-200 pl-3">
-          <div className="hidden sm:flex flex-col text-right">
-            <span className="text-xs font-semibold text-slate-900">{user?.email || "usuario@exemplo.com"}</span>
-            <span className="text-[10px] text-slate-500 uppercase tracking-wider">{user?.role || "user"}</span>
-          </div>
+          {user && (
+            <div className="hidden sm:flex flex-col text-right">
+              <span className="text-xs font-semibold text-slate-900">
+                {user.name ? `${user.name} (${user.email})` : user.email}
+              </span>
+              <span className="text-[10px] text-slate-500 uppercase tracking-wider">{user.role || "user"}</span>
+            </div>
+          )}
           <Button size="icon" variant="ghost" onClick={handleLogout} title="Sair">
             <LogOut className="h-4 w-4 text-slate-500 hover:text-red-600" />
           </Button>

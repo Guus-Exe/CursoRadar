@@ -11,7 +11,7 @@ import { Users, Search, ShieldCheck, Send, CheckCircle2, XCircle } from "lucide-
 interface UserProfile {
   id: string;
   email: string;
-  full_name: string | null;
+  name: string | null;
   role: "admin" | "user";
   telegram_connected: boolean;
   monitors_count: number;
@@ -22,7 +22,7 @@ const INITIAL_USERS: UserProfile[] = [
   {
     id: "usr-01",
     email: "admin@cursoradar.local",
-    full_name: "Administrador do Sistema",
+    name: "Administrador do Sistema",
     role: "admin",
     telegram_connected: true,
     monitors_count: 5,
@@ -31,7 +31,7 @@ const INITIAL_USERS: UserProfile[] = [
   {
     id: "usr-02",
     email: "carlos.silva@gmail.com",
-    full_name: "Carlos Silva",
+    name: "Carlos Silva",
     role: "user",
     telegram_connected: true,
     monitors_count: 3,
@@ -40,7 +40,7 @@ const INITIAL_USERS: UserProfile[] = [
   {
     id: "usr-03",
     email: "mariana.oliveira@outlook.com",
-    full_name: "Mariana Oliveira",
+    name: "Mariana Oliveira",
     role: "user",
     telegram_connected: false,
     monitors_count: 1,
@@ -49,7 +49,7 @@ const INITIAL_USERS: UserProfile[] = [
   {
     id: "usr-04",
     email: "pedro.santos@uol.com.br",
-    full_name: "Pedro Santos",
+    name: "Pedro Santos",
     role: "user",
     telegram_connected: true,
     monitors_count: 4,
@@ -58,7 +58,7 @@ const INITIAL_USERS: UserProfile[] = [
   {
     id: "usr-05",
     email: "juliana.costa@gmail.com",
-    full_name: "Juliana Costa",
+    name: "Juliana Costa",
     role: "user",
     telegram_connected: false,
     monitors_count: 2,
@@ -73,7 +73,7 @@ export default function AdminUsersPage() {
   const filtered = users.filter(
     (u) =>
       u.email.toLowerCase().includes(search.toLowerCase()) ||
-      (u.full_name && u.full_name.toLowerCase().includes(search.toLowerCase()))
+      (u.name && u.name.toLowerCase().includes(search.toLowerCase()))
   );
 
   return (
@@ -119,7 +119,7 @@ export default function AdminUsersPage() {
               {filtered.map((user) => (
                 <TableRow key={user.id}>
                   <TableCell>
-                    <div className="font-medium text-slate-900">{user.full_name || "Sem nome"}</div>
+                    <div className="font-medium text-slate-900">{user.name || "Sem nome"}</div>
                     <div className="text-xs text-slate-500">{user.email}</div>
                   </TableCell>
                   <TableCell>

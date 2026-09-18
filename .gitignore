@@ -39,6 +39,12 @@ data/*.db
 data/*.sqlite3
 data/*.log
 !data/.gitkeep
+**/data/*.db
+**/data/*.sqlite3
+services/monitor/data/
+
+# Local agent skills / scratch
+.agents/skills/use-railway/
 
 # Environment variables & secrets
 .env

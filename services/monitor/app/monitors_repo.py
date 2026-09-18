@@ -35,6 +35,20 @@ class SupabaseMonitorRepository:
         channels = row.get("notify_channels") or ["dashboard", "telegram"]
         prefs = MonitorPreferences()
 
+        provider_slugs: List[str] = list(row.get("provider_slugs") or [])
+        provider_ids: List[str] = list(row.get("provider_ids") or [])
+        mp_list = row.get("monitor_providers") or []
+        for mp in mp_list:
+            if isinstance(mp, dict):
+                pid = mp.get("provider_id")
+                if pid and str(pid) not in provider_ids:
+                    provider_ids.append(str(pid))
+                prov = mp.get("providers")
+                if isinstance(prov, dict) and prov.get("slug"):
+                    pslug = str(prov["slug"])
+                    if pslug not in provider_slugs:
+                        provider_slugs.append(pslug)
+
         return UserMonitor(
             id=str(row["id"]),
             user_id=str(row["user_id"]),
@@ -45,6 +59,8 @@ class SupabaseMonitorRepository:
             active=bool(row.get("active", True)),
             preferences=prefs,
             all_providers=bool(row.get("all_providers", False)),
+            provider_slugs=provider_slugs,
+            provider_ids=provider_ids,
             query_text=row.get("query_text"),
             city=row.get("city"),
             state=row.get("state") or "SP",
@@ -77,7 +93,11 @@ class SupabaseMonitorRepository:
         """Fetches all monitors for a specific user ID."""
         if self.supabase:
             try:
-                query = self.supabase.table("monitors").select("*").eq("user_id", user_id)
+                query = (
+                    self.supabase.table("monitors")
+                    .select("*, monitor_providers(provider_id, providers(name, slug))")
+                    .eq("user_id", user_id)
+                )
                 if active_only:
                     query = query.eq("active", True)
                 res = query.execute()

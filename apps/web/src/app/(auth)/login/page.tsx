@@ -29,34 +29,17 @@ export default function LoginPage() {
       });
 
       if (signInError) {
-        // Fallback for local dev/demo environment without live Supabase cloud
-        if (email.includes("@") && password.length >= 6) {
-          localStorage.setItem("cursoradar_user", JSON.stringify({ email, role: email.startsWith("admin") ? "admin" : "user" }));
-          router.push(email.startsWith("admin") ? "/admin" : "/dashboard");
-          return;
-        }
         setError(signInError.message);
         return;
       }
 
       router.push("/dashboard");
+      router.refresh();
     } catch (err: any) {
-      // Local demo fallback
-      if (email && password) {
-        localStorage.setItem("cursoradar_user", JSON.stringify({ email, role: email.startsWith("admin") ? "admin" : "user" }));
-        router.push(email.startsWith("admin") ? "/admin" : "/dashboard");
-        return;
-      }
       setError("Erro ao autenticar. Verifique suas credenciais.");
     } finally {
       setLoading(false);
     }
-  }
-
-  function handleDemoUser(role: "user" | "admin") {
-    const demoEmail = role === "admin" ? "admin@cursoradar.com" : "usuario@exemplo.com";
-    localStorage.setItem("cursoradar_user", JSON.stringify({ email: demoEmail, role }));
-    router.push(role === "admin" ? "/admin" : "/dashboard");
   }
 
   return (
@@ -108,30 +91,6 @@ export default function LoginPage() {
               {loading ? "Entrando..." : "Entrar"}
             </Button>
 
-            {/* Quick demo buttons */}
-            <div className="pt-2 border-t border-slate-200 w-full text-center">
-              <p className="text-xs text-slate-500 mb-2 font-medium">Acesso Rápido de Teste (Local / Demo):</p>
-              <div className="flex gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="w-1/2 text-xs"
-                  onClick={() => handleDemoUser("user")}
-                >
-                  Entrar como Usuário
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="w-1/2 text-xs border-purple-200 text-purple-700 hover:bg-purple-50"
-                  onClick={() => handleDemoUser("admin")}
-                >
-                  Entrar como Admin
-                </Button>
-              </div>
-            </div>
 
             <div className="text-center text-sm text-slate-600">
               Não tem uma conta?{" "}

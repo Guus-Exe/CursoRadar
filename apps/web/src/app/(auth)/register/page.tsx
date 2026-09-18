@@ -36,22 +36,14 @@ export default function RegisterPage() {
       });
 
       if (signUpError) {
-        // Fallback for local demo environment without live Supabase cloud
-        localStorage.setItem(
-          "cursoradar_user",
-          JSON.stringify({ email, name, role: "user" })
-        );
-        router.push("/dashboard");
+        setError(signUpError.message);
         return;
       }
 
       router.push("/dashboard");
+      router.refresh();
     } catch (err: any) {
-      localStorage.setItem(
-        "cursoradar_user",
-        JSON.stringify({ email, name, role: "user" })
-      );
-      router.push("/dashboard");
+      setError("Erro ao cadastrar. Tente novamente.");
     } finally {
       setLoading(false);
     }

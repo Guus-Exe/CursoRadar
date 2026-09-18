@@ -82,6 +82,7 @@ export default function DashboardPage() {
         const { count: activeCount } = await supabase
           .from("monitors")
           .select("*", { count: "exact", head: true })
+          .eq("user_id", user.id)
           .eq("active", true);
 
         setMonitorsCount(activeCount || 0);
@@ -89,7 +90,8 @@ export default function DashboardPage() {
         // 2. Contagem de alertas recebidos
         const { count: totalAlerts } = await supabase
           .from("alerts")
-          .select("*", { count: "exact", head: true });
+          .select("*", { count: "exact", head: true })
+          .eq("user_id", user.id);
 
         setAlertsCount(totalAlerts || 0);
 
@@ -97,6 +99,7 @@ export default function DashboardPage() {
         const { data: tgAccount } = await supabase
           .from("telegram_accounts")
           .select("telegram_username, active")
+          .eq("user_id", user.id)
           .eq("active", true)
           .maybeSingle();
 
@@ -112,6 +115,7 @@ export default function DashboardPage() {
         const { data: monitorList } = await supabase
           .from("monitors")
           .select("*, monitor_providers(provider_id, providers(name, slug))")
+          .eq("user_id", user.id)
           .order("created_at", { ascending: false })
           .limit(3);
 
@@ -121,6 +125,7 @@ export default function DashboardPage() {
         const { data: alertList } = await supabase
           .from("alerts")
           .select("*")
+          .eq("user_id", user.id)
           .order("sent_at", { ascending: false })
           .limit(3);
 

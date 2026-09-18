@@ -142,6 +142,25 @@ def compute_alert_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+PORTUGUESE_STOPWORDS: Set[str] = {
+    "de", "do", "da", "dos", "das",
+    "em", "no", "na", "nos", "nas",
+    "para", "por", "com", "sem",
+    "e", "ou", "o", "a", "os", "as",
+    "um", "uma", "uns", "umas",
+}
+
+
+def extract_keywords(query: Optional[str]) -> List[str]:
+    """Extracts significant search keywords filtering common Portuguese stopwords."""
+    if not query:
+        return []
+    norm = normalize_text(query)
+    tokens = [t for t in norm.split() if t]
+    significant = [t for t in tokens if t not in PORTUGUESE_STOPWORDS and len(t) > 1]
+    return significant if significant else [t for t in tokens if len(t) > 1]
+
+
 class MatchingEngine:
     """Matches offer change events against active monitors and generates deduplicated alerts."""
 
@@ -167,10 +186,10 @@ class MatchingEngine:
         if not monitor_shift or not monitor_shift.strip():
             return True
         m_shift = monitor_shift.strip().lower()
-        o_shift = offer_shift.strip().lower()
-        if m_shift in o_shift or o_shift in m_shift:
+        o_shift = (offer_shift or "").strip().lower()
+        if m_shift == "qualquer" or not o_shift:
             return True
-        if m_shift == "qualquer":
+        if m_shift in o_shift or o_shift in m_shift:
             return True
         return False
 
@@ -260,7 +279,7 @@ class MatchingEngine:
 
         # Check if event provider is enabled
         if not self.is_provider_enabled(event.provider_slug):
-            logger.debug(f"Provider {event.provider_slug} desabilitado ou inexistente.")
+            logger.info(f"[matching] Provider '{event.provider_slug}' desabilitado ou inexistente no registry.")
             return results
 
         event_modality = (event.modality or "presencial").lower().strip()
@@ -277,68 +296,160 @@ class MatchingEngine:
 
             # 1. Provider match
             if mon.all_providers:
-                pass  # Accepted because event provider is enabled
+                pass  # Accepted across any enabled provider
             elif mon.provider_slugs or mon.provider_ids:
                 slug_match = event.provider_slug in mon.provider_slugs
                 id_match = bool(event.provider_id and event.provider_id in mon.provider_ids)
                 if not (slug_match or id_match):
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                        f"matched=False reason='Provider '{event.provider_slug}' incompatível com {mon.provider_slugs}'"
+                    )
+                    continue
+            elif mon.institution_id and event.institution_id:
+                if mon.institution_id != event.institution_id:
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                        f"matched=False reason='institution_id divergente ({mon.institution_id} != {event.institution_id})'"
+                    )
                     continue
             else:
-                # Legacy monitor: check institution_id
-                if mon.institution_id and event.institution_id:
-                    if mon.institution_id != event.institution_id:
-                        continue
-
-            # 2. Query text / course match
-            if mon.query_text and mon.query_text.strip():
-                q_norm = normalize_text(mon.query_text)
-                t_norm = normalize_text(event.effective_title)
-                q_words = q_norm.split()
-                if not all(w in t_norm for w in q_words):
+                # Default provider fallback: allow senac_sp if no explicit provider set
+                if event.provider_slug != "senac_sp":
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                        f"matched=False reason='Monitor sem configuração de provedor rejeitado para '{event.provider_slug}''"
+                    )
                     continue
-            elif mon.course_id and event.course_id:
-                if mon.course_id != event.course_id:
+
+            # 2. Strict & Conservative Course Match
+            has_course_id = bool(mon.course_id and mon.course_id.strip())
+            has_query = bool(mon.query_text and mon.query_text.strip())
+
+            # Check query_text if specified by monitor
+            if has_query:
+                eff_title = event.effective_title
+                if not eff_title or not eff_title.strip():
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='' "
+                        f"matched=False reason='Título da oferta vazio no evento'"
+                    )
+                    continue
+
+                keywords = extract_keywords(mon.query_text)
+                if not keywords:
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{eff_title}' "
+                        f"matched=False reason='query_text sem termos significativos após remoção de stopwords'"
+                    )
+                    continue
+
+                t_norm = normalize_text(eff_title)
+                missing_kw = [kw for kw in keywords if kw not in t_norm]
+                if missing_kw:
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{eff_title}' "
+                        f"matched=False reason='Termos ausentes no título: {missing_kw}'"
+                    )
+                    continue
+
+            # Check course_id if specified by monitor
+            if has_course_id:
+                if event.course_id:
+                    if mon.course_id != event.course_id:
+                        logger.info(
+                            f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                            f"matched=False reason='course_id divergente ({mon.course_id} != {event.course_id})'"
+                        )
+                        continue
+                elif not has_query:
+                    # Monitor specifies course_id, but event has no course_id and monitor has no query_text fallback
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                        f"matched=False reason='Evento sem course_id e monitor sem query_text (rejeição conservadora)'"
+                    )
                     continue
 
             # 3. Location & Modality match
             if mon.modality and mon.modality.lower().strip() != "all":
                 if mon.modality.lower().strip() != event_modality:
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                        f"matched=False reason='Modalidade incompatível ({mon.modality} vs {event_modality})'"
+                    )
                     continue
 
-            # Online offers bypass city check
+            # Online offers bypass city check; in-person / hybrid require compatible location
             if event_modality != "online":
                 if mon.city and mon.city.strip():
+                    if not event.effective_city:
+                        logger.info(
+                            f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                            f"matched=False reason='Monitor exige cidade {mon.city}, mas evento não possui unidade/cidade'"
+                        )
+                        continue
                     mon_city = normalize_text(mon.city)
                     ev_city = normalize_text(event.effective_city)
                     if mon_city not in ev_city and ev_city not in mon_city:
+                        logger.info(
+                            f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                            f"matched=False reason='Cidade incompatível ({mon.city} vs {event.effective_city})'"
+                        )
                         continue
                 elif mon.location_id and event.location_id:
                     if mon.location_id != event.location_id:
+                        logger.info(
+                            f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                            f"matched=False reason='location_id divergente ({mon.location_id} != {event.location_id})'"
+                        )
                         continue
 
             # 4. Opportunity type match
             op_type = (mon.opportunity_type or "all").lower().strip()
             if op_type == "bolsa":
                 if not (event.effective_has_scholarship and event.effective_bolsa_disponivel):
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                        f"matched=False reason='Bolsa indisponível para monitor focado em bolsa'"
+                    )
                     continue
             elif op_type == "gratuito":
                 if not event.is_free:
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                        f"matched=False reason='Oferta não gratuita para monitor gratuito'"
+                    )
                     continue
             elif op_type == "pago":
                 if not event.effective_inscricao_disponivel or event.is_free:
+                    logger.info(
+                        f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                        f"matched=False reason='Inscrição paga indisponível para monitor pago'"
+                    )
                     continue
 
             # 5. Check shift
             if not self.is_shift_compatible(mon.shift, event.effective_shift):
+                logger.info(
+                    f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                    f"matched=False reason='Turno incompatível ({mon.shift} vs {event.effective_shift})'"
+                )
                 continue
 
             # 6. Check user notification preferences
             if not self.matches_preferences(event, mon.preferences):
+                logger.info(
+                    f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                    f"matched=False reason='Preferências de notificação não atendidas para {event.change_type}'"
+                )
                 continue
 
             # 7. Check if user has active telegram connection
             if not mon.telegram_chat_id:
-                logger.debug(f"Monitor {mon.id} (user {mon.user_id}) compatível mas sem Telegram configurado.")
+                logger.info(
+                    f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                    f"matched=False reason='Sem telegram_chat_id ativo cadastrado'"
+                )
                 continue
 
             # 8. Deduplication fingerprint (using external_id or fingerprint)
@@ -351,13 +462,17 @@ class MatchingEngine:
             )
 
             if fp in self.seen_fingerprints:
-                logger.debug(f"Alerta descartado por deduplicação (fingerprint já processado para user {mon.user_id}).")
+                logger.debug(f"[matching] Alerta descartado por deduplicação (fp={fp[:8]} já processado).")
                 continue
 
             # Record fingerprint
             self.seen_fingerprints.add(fp)
 
             msg = self.format_notification(event)
+            logger.info(
+                f"[matching] monitor_id={mon.id} user_id={mon.user_id} candidate='{event.effective_title}' "
+                f"matched=True reason='Critérios compatíveis com sucesso'"
+            )
             results.append(
                 MatchResult(
                     user_id=mon.user_id,
@@ -370,5 +485,8 @@ class MatchingEngine:
                 )
             )
 
-        logger.info(f"Matching concluído para oferta {event.offer_id}: {len(results)} alertas gerados de {len(monitors)} monitores.")
+        logger.info(
+            f"[matching] Matching concluído para oferta '{event.effective_title}' ({event.offer_id}): "
+            f"{len(results)} alertas gerados de {len(monitors)} monitores."
+        )
         return results

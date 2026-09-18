@@ -69,8 +69,13 @@ class TelegramProvider(NotificationProvider):
             return False
         return await self.send_to_user(self.chat_id, text)
 
-    async def send_offer_alert(self, diff: StateDiff, url: str) -> bool:
-        """Sends formatted alert when course availability or status changes."""
+    async def send_offer_alert(
+        self,
+        diff: StateDiff,
+        url: str,
+        recipient_id: Optional[str] = None,
+    ) -> bool:
+        """Sends formatted alert when course availability or status changes to a specific recipient."""
         curr = diff.current_state
         prev = diff.previous_state
 
@@ -102,20 +107,20 @@ class TelegramProvider(NotificationProvider):
             f"Link:\n{url}"
         )
 
-        sent_any = False
-        if self.link_manager:
-            for acc in self.link_manager.list_active_accounts():
-                if await self.send_to_user(acc.telegram_chat_id, msg):
-                    sent_any = True
+        target_chat = recipient_id or self.chat_id
+        if not target_chat:
+            logger.warning("[telegram] Alerta não enviado: nenhum destinatário informado.")
+            return False
 
-        if self.chat_id:
-            if await self.send_to_user(self.chat_id, msg):
-                sent_any = True
+        logger.info(f"[telegram] Enviando alerta de vaga isolado para chat {target_chat}")
+        return await self.send_to_user(target_chat, msg)
 
-        return sent_any
-
-    async def send_new_offer_alert(self, offer: DiscoveredOffer) -> bool:
-        """Sends formatted alert when a new offer is discovered for the course."""
+    async def send_new_offer_alert(
+        self,
+        offer: DiscoveredOffer,
+        recipient_id: Optional[str] = None,
+    ) -> bool:
+        """Sends formatted alert when a new offer is discovered to a specific recipient."""
         detected_time = offer.descoberto_em.strftime("%d/%m/%Y %H:%M:%S")
         bolsa_str = "Disponível ✅" if offer.bolsa_disponivel else "A verificar / Indisponível"
 
@@ -132,20 +137,16 @@ class TelegramProvider(NotificationProvider):
             f"Link:\n{offer.url}"
         )
 
-        sent_any = False
-        if self.link_manager:
-            for acc in self.link_manager.list_active_accounts():
-                if await self.send_to_user(acc.telegram_chat_id, msg):
-                    sent_any = True
+        target_chat = recipient_id or self.chat_id
+        if not target_chat:
+            logger.warning("[telegram] Alerta de nova oferta não enviado: nenhum destinatário informado.")
+            return False
 
-        if self.chat_id:
-            if await self.send_to_user(self.chat_id, msg):
-                sent_any = True
-
-        return sent_any
+        logger.info(f"[telegram] Enviando alerta de nova oferta isolado para chat {target_chat}")
+        return await self.send_to_user(target_chat, msg)
 
     async def send_health_alert(self, consecutive_failures: int, details: Optional[str] = None) -> bool:
-        """Sends warning message about repeated connection failures."""
+        """Sends operational warning message about repeated connection failures exclusively to admin."""
         now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         details_text = f"\nÚltimo erro: {details}" if details else ""
 
@@ -157,17 +158,12 @@ class TelegramProvider(NotificationProvider):
             f"O monitor continuará tentando se recuperar automaticamente."
         )
 
-        sent_any = False
-        if self.link_manager:
-            for acc in self.link_manager.list_active_accounts():
-                if await self.send_to_user(acc.telegram_chat_id, msg):
-                    sent_any = True
+        # Health alerts are strictly operational and only sent to configured admin chat_id
+        if not self.chat_id:
+            logger.warning("[telegram] Alerta de saúde operacional não enviado: admin chat_id não configurado.")
+            return False
 
-        if self.chat_id:
-            if await self.send_to_user(self.chat_id, msg):
-                sent_any = True
-
-        return sent_any
+        return await self.send_to_user(self.chat_id, msg)
 
     def create_application(
         self,
