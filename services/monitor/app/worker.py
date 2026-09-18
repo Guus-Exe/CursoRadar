@@ -11,7 +11,7 @@ from app.matching import MatchingEngine, MatchResult, MonitorPreferences, OfferC
 from app.models import DiscoveredOffer, OfferState, StateDiff
 from app.monitors_repo import SupabaseMonitorRepository
 from app.notifications.telegram import TelegramProvider
-from app.providers.base import EducationProvider
+from app.providers.base import EducationProvider, ProviderSearchResult, SearchStatus
 from app.providers.registry import ProviderRegistry, get_provider_registry
 from app.providers.senac import SenacSPProvider
 from app.telegram_link import TelegramLinkManager
@@ -194,17 +194,109 @@ class CourseWorker:
 
         for idx, mon in enumerate(user_monitors, 1):
             q_name = mon.query_text or "Curso"
-            found_any = False
             for p_slug, p_instance in active_providers.items():
+                logger.info(f"[{self.worker_id}][/check] Verificando monitor '{q_name}' no provider '{p_slug}'...")
                 try:
-                    offers = await p_instance.search_offers(q_name)
-                    if offers:
-                        found_any = True
-                        results_lines.append(f"[{idx}] {q_name} ({p_instance.name}): {len(offers)} turma(s) encontrada(s).")
-                except Exception:
-                    pass
-            if not found_any:
-                results_lines.append(f"[{idx}] {q_name}: Nenhuma nova vaga aberta no momento.")
+                    if hasattr(p_instance, "search_offers_structured"):
+                        search_res = await p_instance.search_offers_structured(q_name)
+                    else:
+                        offers = await p_instance.search_offers(q_name)
+                        available_c = len([o for o in offers if o.inscricao_disponivel or o.bolsa_disponivel])
+                        st = SearchStatus.AVAILABLE_OFFERS_FOUND if available_c > 0 else (SearchStatus.CLASSES_FOUND_NO_AVAILABILITY if offers else SearchStatus.COURSE_NOT_FOUND)
+                        search_res = ProviderSearchResult(
+                            provider_slug=p_slug,
+                            search_query=q_name,
+                            status=st,
+                            course_name=q_name,
+                            classes_count=len(offers),
+                            available_classes_count=available_c,
+                            raw_status_list=[o.status for o in offers],
+                            offers=offers,
+                        )
+
+                    logger.info(
+                        f"[{self.worker_id}][/check] Resultado '{q_name}' ({p_slug}): "
+                        f"status={search_res.status.value}, curso='{search_res.course_name}', "
+                        f"turmas={search_res.classes_count}, abertas={search_res.available_classes_count}"
+                    )
+
+                    if search_res.status == SearchStatus.COURSE_NOT_FOUND:
+                        results_lines.append(f"[{idx}] {q_name}: ❌ Curso não encontrado no catálogo do {p_instance.name}.")
+                    elif search_res.status == SearchStatus.UNSUPPORTED_COURSE_TYPE:
+                        cat_label = search_res.category or "outro tipo"
+                        c_name = f" ('{search_res.course_name}')" if search_res.course_name else ""
+                        results_lines.append(
+                            f"[{idx}] {q_name}: ⚠️ Curso identificado como '{cat_label}'{c_name}. "
+                            f"Nesta etapa, o monitoramento suporta exclusivamente Cursos Técnicos."
+                        )
+                    elif search_res.status == SearchStatus.NO_CLASSES_FOUND:
+                        results_lines.append(
+                            f"[{idx}] {q_name}: ℹ️ Curso técnico encontrado ('{search_res.course_name}'), "
+                            f"porém não há turmas cadastradas em nenhuma unidade no momento."
+                        )
+                    elif search_res.status == SearchStatus.CLASSES_FOUND_NO_AVAILABILITY:
+                        results_lines.append(
+                            f"[{idx}] {q_name}: ⏸️ {search_res.classes_count} turma(s) encontrada(s) ('{search_res.course_name}'), "
+                            f"mas todas estão sem vagas abertas (inscrições e bolsas encerradas)."
+                        )
+                    elif search_res.status == SearchStatus.AVAILABLE_OFFERS_FOUND:
+                        # Evaluate MatchingEngine with real normalized technical offers
+                        matched_offers = []
+                        for off in search_res.offers:
+                            if not (off.inscricao_disponivel or off.bolsa_disponivel):
+                                continue
+                            ev = OfferChangeEvent(
+                                offer_id=off.external_id or "offer",
+                                provider_slug=p_slug,
+                                institution_name=p_instance.name,
+                                shift=off.shift,
+                                modality=off.modality,
+                                title=off.title,
+                                city=off.campus_or_unit,
+                                change_type="ENROLLMENT_OPEN" if off.inscricao_disponivel else "SCHOLARSHIP_OPEN",
+                                url=off.source_url,
+                                current_state=OfferState(
+                                    curso=off.title,
+                                    unidade=off.campus_or_unit or "Senac SP",
+                                    turno=off.shift,
+                                    status=off.status,
+                                    inscricao_disponivel=off.inscricao_disponivel,
+                                    bolsa_disponivel=off.bolsa_disponivel,
+                                    codigo_oferta=off.external_id,
+                                    url=off.source_url,
+                                ),
+                                inscricao_disponivel=off.inscricao_disponivel,
+                                bolsa_disponivel=off.bolsa_disponivel,
+                            )
+                            matches = self.matching_engine.match(ev, [mon])
+                            if matches:
+                                matched_offers.append((off, matches[0]))
+
+                        if matched_offers:
+                            details = []
+                            for off, match_res in matched_offers:
+                                vaga_tipo = "Inscrição Aberta" if off.inscricao_disponivel else "Bolsa Disponível"
+                                details.append(f"• {off.campus_or_unit} ({off.shift}) — {vaga_tipo} | {off.source_url}")
+                            det_str = "\n    ".join(details)
+                            results_lines.append(
+                                f"[{idx}] {q_name}: 🎉 VAGA ENCONTRADA!\n"
+                                f"    Curso: {search_res.course_name}\n"
+                                f"    {det_str}"
+                            )
+                        else:
+                            results_lines.append(
+                                f"[{idx}] {q_name}: 🔍 {search_res.available_classes_count} turma(s) com vagas aberta(s) ('{search_res.course_name}'), "
+                                f"porém nenhuma atende aos seus critérios de filtro (Turno: {mon.shift or 'Qualquer'}, Modalidade: {mon.modality or 'Todas'})."
+                            )
+                    else:
+                        results_lines.append(f"[{idx}] {q_name}: ⚠️ {search_res.message or 'Erro ao consultar ofertas.'}")
+
+                except Exception as err:
+                    logger.error(
+                        f"[{self.worker_id}][/check] Falha ao verificar monitor '{q_name}' no provider '{p_slug}': {err}",
+                        exc_info=True,
+                    )
+                    results_lines.append(f"[{idx}] {q_name}: ⚠️ Erro na consulta do provider {p_instance.name}: {err}")
 
         return "\n".join(results_lines)
 

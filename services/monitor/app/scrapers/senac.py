@@ -4,14 +4,68 @@ import asyncio
 from datetime import datetime
 import json
 import re
-from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, urlencode, urlparse
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 import httpx
 from app.config import get_settings
 from app.models import DiscoveredOffer, OfferState
+from app.providers.base import CourseData
 from app.scrapers.base import BaseScraper
 from app.scrapers.offer_parser import OfferParser, normalize_shift
 from app.utils.logger import logger
+
+
+def rank_best_course(query: str, candidates: List[CourseData]) -> Tuple[Optional[CourseData], float]:
+    """Ranks and selects the most relevant course match for the given query."""
+    if not candidates:
+        return None, 0.0
+
+    from app.matching import normalize_text
+
+    q_norm = normalize_text(query)
+    q_words = set(q_norm.split())
+    stopwords = {"em", "de", "do", "da", "para", "e", "com", "no", "na"}
+    key_q = q_words - stopwords
+    if not key_q:
+        key_q = q_words
+
+    best_candidate: Optional[CourseData] = None
+    best_score = -1.0
+
+    for c in candidates:
+        t_norm = normalize_text(c.name)
+        s_norm = normalize_text(c.slug.replace("-", " ").replace("/", " "))
+
+        if q_norm == t_norm or q_norm == s_norm:
+            return c, 1.0
+
+        t_words = set(t_norm.split()) - stopwords
+        intersection = key_q.intersection(t_words)
+        if not intersection:
+            score = 0.0
+        else:
+            overlap = len(intersection) / len(key_q)
+            score = overlap * 0.75
+
+            if q_norm in t_norm or t_norm in q_norm:
+                score += 0.15
+
+            # Priority bonus for technical course
+            if c.category == "cursos-tecnicos" or "tecnico" in t_norm or "cursos-tecnicos" in c.slug:
+                score += 0.20
+
+            # Penalty for extraneous words not in the query
+            extra_words = len(t_words - key_q)
+            score -= extra_words * 0.05
+
+        if score > best_score:
+            best_score = score
+            best_candidate = c
+
+    if best_score < 0.40:
+        return None, max(best_score, 0.0)
+
+    return best_candidate, max(best_score, 0.0)
 
 
 DEFAULT_HEADERS = {
@@ -130,8 +184,156 @@ class SenacScraper(BaseScraper):
             logger.warning(f"Não foi possível consultar wse-bolsas para oferta {offer_id}: {err}")
             return None
 
+    async def search_courses_api(self, query: str) -> List[CourseData]:
+        """Queries Senac SP keywords search API and normalizes found courses."""
+        q_clean = query.strip()
+        if not q_clean:
+            return []
+
+        search_url = (
+            f"https://www.sp.senac.br/o/senacsearch/keywords-v2/curso/"
+            f"{SENAC_COMPANY_ID}/{SENAC_GROUP_ID}/{quote(q_clean)}/0/30"
+        )
+        logger.info(f"Consultando catálogo do Senac SP via API para query '{q_clean}'...")
+        try:
+            resp = await self._request_with_retry(
+                "GET",
+                search_url,
+                headers={"Accept": "application/json, text/plain, */*"},
+            )
+            data = resp.json()
+            cursos = data.get("cursos", [])
+            logger.info(f"API do Senac SP retornou {len(cursos)} resultado(s) bruto(s) para '{q_clean}'.")
+        except Exception as err:
+            logger.error(f"Falha ao consultar API de palavras-chave do Senac para '{q_clean}': {err}")
+            raise
+
+        courses: List[CourseData] = []
+        for c in cursos:
+            t_raw = c.get("title_pt_BR")
+            if isinstance(t_raw, list) and t_raw:
+                title = t_raw[0]
+            else:
+                title = str(t_raw or "")
+
+            rel_url = str(c.get("url") or "").strip().lstrip("/")
+            art_raw = c.get("articleId")
+            if isinstance(art_raw, list) and art_raw:
+                article_id = str(art_raw[0])
+            else:
+                article_id = str(art_raw or "")
+
+            codigo_ft = str(c.get("codigoFT_pt_BR") or c.get("codigoFT") or "")
+            category = "cursos-tecnicos" if rel_url.startswith("cursos-tecnicos/") else (rel_url.split("/")[0] if "/" in rel_url else "outro")
+
+            courses.append(
+                CourseData(
+                    id=article_id or None,
+                    name=title,
+                    slug=rel_url,
+                    category=category,
+                    external_id=article_id or None,
+                )
+            )
+
+        return courses
+
+    async def fetch_technical_course_offers(
+        self,
+        course_data: CourseData,
+        unit_filter: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], List[OfferState]]:
+        """Extracts technical course metadata and all class offers without silent fallbacks."""
+        course_full_url = f"https://www.sp.senac.br/{course_data.slug.lstrip('/')}"
+        logger.info(f"Carregando página do curso técnico: {course_full_url}")
+
+        html = await self.fetch_page_html(course_full_url)
+        match = re.search(r'var data = JSON\.parse\(\'({.*?})\'\)', html)
+        if not match:
+            logger.error(f"Página '{course_full_url}' não contém bloco de dados 'var data = JSON.parse'. Fallback para Modelagem desabilitado.")
+            raise ValueError(f"Metadados técnicos 'var data' não encontrados na página {course_full_url}.")
+
+        raw_json = match.group(1).replace(r'\"', '"').replace(r'\/', '/')
+        meta = json.loads(raw_json)
+
+        article_id = str(meta.get("articleId") or course_data.external_id or "").strip()
+        codigo_ft = str(meta.get("codigoFT") or "").strip()
+        data_efetiva = str(meta.get("dataEfetivaSTR") or "2022-01-01").strip()
+        unidades = meta.get("unidades", [])
+
+        if not article_id or not codigo_ft:
+            raise ValueError(f"Metadados incompletos na página {course_full_url}: articleId={article_id}, codigoFT={codigo_ft}")
+
+        # Build categoryId to unit name map
+        unit_map: Dict[str, str] = {}
+        for u in unidades:
+            c_id = str(u.get("categoryId") or "").strip()
+            u_name = u.get("nome") or "Senac SP"
+            if c_id:
+                unit_map[c_id] = u_name
+
+        # Filter units if filter provided
+        target_cat_ids = []
+        if unit_filter and unit_filter.lower() != "qualquer":
+            uf_clean = unit_filter.lower().strip()
+            for c_id, u_name in unit_map.items():
+                if uf_clean in u_name.lower():
+                    target_cat_ids.append(c_id)
+        if not target_cat_ids:
+            target_cat_ids = list(unit_map.keys())
+
+        if not target_cat_ids:
+            logger.info(f"Nenhuma unidade com categoryId válida para o curso {course_data.name}.")
+            return meta, []
+
+        cat_ids_param = ",".join(target_cat_ids)
+        api_url = f"https://www.sp.senac.br/o/senac-oferta-services/ofertasPorCategoryIds/{SENAC_GROUP_ID}"
+        params = {
+            "codigoFTOferta": codigo_ft,
+            "dataEfetivaOferta": data_efetiva,
+            "categoryIds": cat_ids_param,
+            "inscricaoAberta": "false",
+            "bolsaAberta": "false",
+            "cursoArticleId": article_id,
+            "considerarDataBolsaFutura": "true",
+            "start": "-1",
+            "end": "-1",
+        }
+
+        try:
+            resp = await self._request_with_retry(
+                "GET",
+                api_url,
+                params=params,
+                headers={"Referer": course_full_url, "Accept": "application/json, text/plain, */*"},
+            )
+            raw_offers = resp.json()
+        except Exception as err:
+            logger.error(f"Erro ao consultar ofertasPorCategoryIds para {course_data.name}: {err}")
+            raise
+
+        offers_states: List[OfferState] = []
+        if isinstance(raw_offers, list):
+            for item in raw_offers:
+                content_xml = item.get("content", "")
+                unit_cat = str(item.get("unidadeCategoryIds") or "").strip()
+                unit_name = unit_map.get(unit_cat, "Senac São Paulo")
+
+                state = OfferParser.parse_api_offer(
+                    xml_content=content_xml,
+                    course_meta=meta,
+                    unit_name=unit_name,
+                    offer_url=course_full_url,
+                )
+                if state.codigo_oferta:
+                    state.url = f"{course_full_url}?oferta={state.codigo_oferta}"
+                offers_states.append(state)
+
+        logger.info(f"Extraídas {len(offers_states)} oferta(s) para {course_data.name} via API interna.")
+        return meta, offers_states
+
     async def get_offer_state(self, url_or_id: str) -> OfferState:
-        """Retrieves and normalizes offer state from URL or offer ID."""
+        """Retrieves and normalizes offer state from URL or offer ID without silent fallback."""
         target_url = url_or_id
         target_offer_id = self.settings.target_offer_id
 
@@ -144,39 +346,59 @@ class SenacScraper(BaseScraper):
             target_offer_id = url_or_id
             target_url = self.settings.senac_offer_url
 
-        # 1. Fetch course page to get metadata and Liferay tokens
         logger.info(f"Carregando página do curso: {target_url}")
         html = await self.fetch_page_html(target_url)
 
-        # 2. Extract embedded course data from HTML
-        article_id = "52620802"
-        codigo_ft = "21464"
-        data_efetiva = "2023-01-01"
-        category_id_unidade = "40814"  # Default Lapa Faustolo
-        unidade_nome = self.settings.unit_name
-        course_meta = {"tituloComercial": self.settings.course_name}
-
         match = re.search(r'var data = JSON\.parse\(\'({.*?})\'\)', html)
         if match:
-            try:
-                raw_json = match.group(1).replace(r'\"', '"').replace(r'\/', '/')
-                extracted_meta = json.loads(raw_json)
-                course_meta.update(extracted_meta)
-                article_id = str(extracted_meta.get("articleId", article_id))
-                codigo_ft = str(extracted_meta.get("codigoFT", codigo_ft))
-                data_efetiva = str(extracted_meta.get("dataEfetivaSTR", data_efetiva))
+            raw_json = match.group(1).replace(r'\"', '"').replace(r'\/', '/')
+            extracted_meta = json.loads(raw_json)
+            article_id = str(extracted_meta.get("articleId", "")).strip()
+            codigo_ft = str(extracted_meta.get("codigoFT", "")).strip()
+            data_efetiva = str(extracted_meta.get("dataEfetivaSTR", "2023-01-01")).strip()
+            course_meta = extracted_meta
+            unidade_nome = self.settings.unit_name
+            category_id_unidade = ""
 
-                # Identify unit categoryId
-                for u in extracted_meta.get("unidades", []):
-                    u_name = u.get("nome", "").lower()
-                    if "faustolo" in u_name or "lapa" in u_name:
-                        category_id_unidade = str(u.get("categoryId", category_id_unidade))
-                        unidade_nome = u.get("nome", unidade_nome)
-                        break
-            except Exception as err:
-                logger.warning(f"Erro ao analisar metadados embutidos do curso: {err}")
+            for u in extracted_meta.get("unidades", []):
+                u_name = u.get("nome", "").lower()
+                if self.settings.unit_name.lower() in u_name:
+                    category_id_unidade = str(u.get("categoryId", ""))
+                    unidade_nome = u.get("nome", unidade_nome)
+                    break
+            if not category_id_unidade and extracted_meta.get("unidades"):
+                first_u = extracted_meta["unidades"][0]
+                category_id_unidade = str(first_u.get("categoryId", ""))
+                unidade_nome = first_u.get("nome", unidade_nome)
+        else:
+            m_art = re.search(r'<input[^>]+name="articleId"[^>]+value="([^"]+)"', html)
+            m_ft = re.search(r'<input[^>]+name="codigoFT"[^>]+value="([^"]+)"', html)
+            if m_art and m_ft:
+                article_id = m_art.group(1).strip()
+                codigo_ft = m_ft.group(1).strip()
+                data_efetiva = "2022-01-01"
+                category_id_unidade = ""
+                unidade_nome = self.settings.unit_name
+                course_meta = {"tituloComercial": self.settings.course_name}
+            else:
+                logger.warning(f"Metadados técnicos dinâmicos ausentes em {target_url}. Utilizando parser HTML.")
+                return OfferParser.parse_html_offer(
+                    html=html,
+                    target_offer_id=target_offer_id,
+                    default_course=self.settings.course_name,
+                    default_unit=self.settings.unit_name,
+                    offer_url=target_url,
+                )
 
-        # 3. Query internal ofertasPorCategoryIds service
+        if not article_id or not codigo_ft:
+            return OfferParser.parse_html_offer(
+                html=html,
+                target_offer_id=target_offer_id,
+                default_course=self.settings.course_name,
+                default_unit=self.settings.unit_name,
+                offer_url=target_url,
+            )
+
         api_url = f"https://www.sp.senac.br/o/senac-oferta-services/ofertasPorCategoryIds/{SENAC_GROUP_ID}"
         params = {
             "codigoFTOferta": codigo_ft,
@@ -199,7 +421,6 @@ class SenacScraper(BaseScraper):
             )
             raw_offers = resp.json()
             if isinstance(raw_offers, list) and len(raw_offers) > 0:
-                # Find matching target offer if specified, otherwise take first
                 matching_item = None
                 for item in raw_offers:
                     content_xml = item.get("content", "")
@@ -211,7 +432,6 @@ class SenacScraper(BaseScraper):
                     matching_item = raw_offers[0]
 
                 content_xml = matching_item.get("content", "")
-                # Query real-time bolsa status
                 bolsa_data = None
                 if target_offer_id:
                     bolsa_data = await self.fetch_live_bolsa_data(target_offer_id)
@@ -228,7 +448,6 @@ class SenacScraper(BaseScraper):
         except Exception as err:
             logger.warning(f"Consulta à API interna de ofertas falhou ({err}). Utilizando parser de HTML...")
 
-        # 4. Fallback parser on HTML page
         state = OfferParser.parse_html_offer(
             html=html,
             target_offer_id=target_offer_id,
@@ -245,79 +464,33 @@ class SenacScraper(BaseScraper):
         unit_name: str,
         shift: Optional[str] = None,
     ) -> List[DiscoveredOffer]:
-        """Searches Senac portal for new offers of the given course and unit."""
-        logger.info(f"Iniciando busca de novas ofertas para '{course_name}' na unidade '{unit_name}'...")
-        query = course_name.replace(" ", "%20")
-        search_url = (
-            f"https://www.sp.senac.br/o/senacsearch/keywords-v2/curso/"
-            f"{SENAC_COMPANY_ID}/{SENAC_GROUP_ID}/modelagem/0/30"
-        )
-
+        """Searches Senac portal for new offers of the given course and unit dynamically."""
+        logger.info(f"Iniciando busca dinâmica de novas ofertas para '{course_name}' na unidade '{unit_name}'...")
         offers_found: List[DiscoveredOffer] = []
 
         try:
-            resp = await self._request_with_retry(
-                "GET",
-                search_url,
-                headers={"Accept": "application/json, text/plain, */*"},
-            )
-            data = resp.json()
-            cursos = data.get("cursos", [])
-
-            matching_course = None
-            for c in cursos:
-                url_title = c.get("url", "")
-                titles = c.get("title_pt_BR", [])
-                if "modelagem-do-vestuario" in url_title or any("modelagem do vestuário" in t.lower() for t in titles):
-                    matching_course = c
-                    break
-
-            if not matching_course:
-                logger.info("Curso não encontrado no resultado de busca por palavras-chave.")
+            candidates = await self.search_courses_api(course_name)
+            if not candidates:
+                logger.info(f"Nenhum curso retornado pela API de busca para '{course_name}'.")
                 return offers_found
 
-            codigo_ft = matching_course.get("codigoFT_pt_BR", "21464")
-            data_efetiva = matching_course.get("dataEfetivaFT", "2023-01-01")
-            article_ids = matching_course.get("articleId", ["52620802"])
-            article_id = article_ids[0] if article_ids else "52620802"
-            course_rel_url = matching_course.get("url", "cursos-tecnicos/curso-tecnico-em-modelagem-do-vestuario")
+            best_course, score = rank_best_course(course_name, candidates)
+            if not best_course or score < 0.4:
+                logger.info(f"Nenhum curso com relevância suficiente para '{course_name}' (score: {score:.2f}).")
+                return offers_found
 
-            # Lapa Faustolo category ID = 40814
-            category_id = "40814"
-            api_url = f"https://www.sp.senac.br/o/senac-oferta-services/ofertasPorCategoryIds/{SENAC_GROUP_ID}"
-            params = {
-                "codigoFTOferta": codigo_ft,
-                "dataEfetivaOferta": data_efetiva,
-                "categoryIds": category_id,
-                "inscricaoAberta": "false",
-                "bolsaAberta": "false",
-                "cursoArticleId": article_id,
-                "considerarDataBolsaFutura": "true",
-                "start": "-1",
-                "end": "-1",
-            }
+            if best_course.category != "cursos-tecnicos":
+                logger.info(f"Curso '{best_course.name}' é da categoria '{best_course.category}'. Descoberta suporta apenas cursos técnicos.")
+                return offers_found
 
-            ofertas_resp = await self._request_with_retry("GET", api_url, params=params)
-            ofertas_data = ofertas_resp.json()
+            _, offers_states = await self.fetch_technical_course_offers(best_course, unit_filter=unit_name)
 
-            for item in ofertas_data:
-                content_xml = item.get("content", "")
-                parsed = OfferParser.parse_api_offer(
-                    xml_content=content_xml,
-                    course_meta={"tituloComercial": course_name},
-                    unit_name=unit_name,
-                )
-
-                # Filter by shift if provided
-                if shift:
+            for parsed in offers_states:
+                if shift and shift.lower() != "qualquer":
                     if shift.lower() not in parsed.turno.lower():
                         continue
 
-                offer_url = (
-                    f"https://www.sp.senac.br/senac-lapa-faustolo/{course_rel_url}"
-                    f"?bolsa=true&oferta={parsed.codigo_oferta}"
-                )
-
+                offer_url = parsed.url or f"https://www.sp.senac.br/{best_course.slug}?oferta={parsed.codigo_oferta}"
                 discovered = DiscoveredOffer(
                     codigo_oferta=parsed.codigo_oferta or "desconhecida",
                     curso=parsed.curso,
@@ -332,8 +505,8 @@ class SenacScraper(BaseScraper):
                 )
                 offers_found.append(discovered)
 
-            logger.info(f"Busca concluída: {len(offers_found)} ofertas encontradas para {unit_name}.")
+            logger.info(f"Busca de descoberta concluída: {len(offers_found)} ofertas encontradas para {course_name} em {unit_name}.")
         except Exception as err:
-            logger.error(f"Erro ao buscar novas ofertas no Senac: {err}")
+            logger.error(f"Erro ao buscar novas ofertas no Senac para '{course_name}': {err}")
 
         return offers_found

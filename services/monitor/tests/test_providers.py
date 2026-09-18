@@ -28,10 +28,10 @@ async def test_senac_provider_search_courses():
     assert len(all_courses) >= 5
 
     filtered = await provider.search_courses("vestuário")
-    assert len(filtered) == 1
-    assert filtered[0].name == "Técnico em Modelagem do Vestuário"
-    assert filtered[0].external_id == "52620802"
+    assert len(filtered) >= 1
+    assert any(c.name == "Técnico em Modelagem do Vestuário" and c.external_id == "52620802" for c in filtered)
 
     filtered_adm = await provider.search_courses("administração")
-    assert len(filtered_adm) == 1
-    assert "Administração" in filtered_adm[0].name
+    assert len(filtered_adm) >= 1
+    assert any("Administração" in c.name for c in filtered_adm)
+

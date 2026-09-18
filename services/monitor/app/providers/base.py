@@ -1,6 +1,7 @@
 """Abstract base EducationProvider interface and normalized models for educational institutions."""
 
 from abc import ABC, abstractmethod
+from enum import Enum
 import hashlib
 from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
@@ -64,6 +65,36 @@ class NormalizedOffer(BaseModel):
             self.compute_fingerprint()
 
 
+class SearchStatus(str, Enum):
+    """Categorized status for a course offer search attempt."""
+
+    COURSE_NOT_FOUND = "COURSE_NOT_FOUND"
+    UNSUPPORTED_COURSE_TYPE = "UNSUPPORTED_COURSE_TYPE"
+    NO_CLASSES_FOUND = "NO_CLASSES_FOUND"
+    CLASSES_FOUND_NO_AVAILABILITY = "CLASSES_FOUND_NO_AVAILABILITY"
+    AVAILABLE_OFFERS_FOUND = "AVAILABLE_OFFERS_FOUND"
+    ERROR = "ERROR"
+
+
+class ProviderSearchResult(BaseModel):
+    """Structured diagnostic and operational search outcome from a provider."""
+
+    provider_slug: str
+    search_query: str
+    status: SearchStatus
+    course_name: Optional[str] = None
+    course_url: Optional[str] = None
+    article_id: Optional[str] = None
+    codigo_ft: Optional[str] = None
+    category: Optional[str] = None
+    units_found: List[str] = Field(default_factory=list)
+    classes_count: int = 0
+    available_classes_count: int = 0
+    raw_status_list: List[str] = Field(default_factory=list)
+    offers: List[NormalizedOffer] = Field(default_factory=list)
+    message: str = ""
+
+
 class EducationProvider(ABC):
     """Abstract interface for education providers (Senac, Senai, Etec, Fatec).
 
@@ -103,6 +134,29 @@ class EducationProvider(ABC):
     async def search_offers(self, query: str = "", **kwargs: Any) -> List[NormalizedOffer]:
         """Searches or lists normalized offers by query."""
         return []
+
+    async def search_offers_structured(self, query: str = "", **kwargs: Any) -> ProviderSearchResult:
+        """Executes search returning structured diagnostic result alongside normalized offers."""
+        offers = await self.search_offers(query, **kwargs)
+        if not offers:
+            return ProviderSearchResult(
+                provider_slug=self.slug,
+                search_query=query,
+                status=SearchStatus.COURSE_NOT_FOUND,
+                message="Nenhuma oferta encontrada.",
+            )
+        available_count = len([o for o in offers if o.inscricao_disponivel or o.bolsa_disponivel])
+        status = SearchStatus.AVAILABLE_OFFERS_FOUND if available_count > 0 else SearchStatus.CLASSES_FOUND_NO_AVAILABILITY
+        return ProviderSearchResult(
+            provider_slug=self.slug,
+            search_query=query,
+            status=status,
+            classes_count=len(offers),
+            available_classes_count=available_count,
+            raw_status_list=[o.status for o in offers],
+            offers=offers,
+            message=f"{len(offers)} turma(s) encontrada(s).",
+        )
 
     @abstractmethod
     async def get_offer_state(self, url_or_id: str) -> Union[OfferState, NormalizedOffer]:
