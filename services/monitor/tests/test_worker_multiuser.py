@@ -547,3 +547,250 @@ async def test_legacy_course_monitor_not_dominating(temp_db: Database):
     assert len(worker.active_monitors) == 1
     assert worker.active_monitors[0].query_text == "Administração do Ubuntu Server"
     assert settings.enable_legacy_monitor is False
+
+
+# ---------------------------------------------------------------------------
+# TEST 15: Monitor com user_id recebe telegram_chat_id correto
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_monitor_receives_correct_telegram_chat_id(temp_db: Database):
+    """Validates that a monitor with user_id is properly hydrated with its linked telegram_chat_id."""
+    link_mgr = TelegramLinkManager()
+    link_mgr._accounts_by_user["user-abc"] = MagicMock(user_id="user-abc", telegram_chat_id="chat-9999", active=True)
+    link_mgr._accounts_by_chat["chat-9999"] = link_mgr._accounts_by_user["user-abc"]
+
+    repo = SupabaseMonitorRepository()
+    repo.seed_in_memory_monitor(
+        UserMonitor(id="mon-1", user_id="user-abc", query_text="Técnico em Redes de Computadores", active=True, telegram_chat_id=None)
+    )
+
+    worker = CourseWorker(
+        database=temp_db,
+        link_manager=link_mgr,
+        monitor_repo=repo,
+    )
+
+    await worker.sync_monitors_from_supabase()
+    assert len(worker.active_monitors) == 1
+    assert worker.active_monitors[0].telegram_chat_id == "chat-9999"
+
+
+# ---------------------------------------------------------------------------
+# TEST 16: Dois usuários recebem chat_ids diferentes
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_two_users_receive_different_chat_ids(temp_db: Database):
+    """Validates that monitors belonging to different users receive their respective unique chat_ids."""
+    link_mgr = TelegramLinkManager()
+    link_mgr._accounts_by_user["user-1"] = MagicMock(user_id="user-1", telegram_chat_id="chat-user-1", active=True)
+    link_mgr._accounts_by_chat["chat-user-1"] = link_mgr._accounts_by_user["user-1"]
+    link_mgr._accounts_by_user["user-2"] = MagicMock(user_id="user-2", telegram_chat_id="chat-user-2", active=True)
+    link_mgr._accounts_by_chat["chat-user-2"] = link_mgr._accounts_by_user["user-2"]
+
+    repo = SupabaseMonitorRepository()
+    repo.seed_in_memory_monitor(
+        UserMonitor(id="mon-u1", user_id="user-1", query_text="Redes", active=True, telegram_chat_id=None)
+    )
+    repo.seed_in_memory_monitor(
+        UserMonitor(id="mon-u2", user_id="user-2", query_text="Python", active=True, telegram_chat_id=None)
+    )
+
+    worker = CourseWorker(
+        database=temp_db,
+        link_manager=link_mgr,
+        monitor_repo=repo,
+    )
+
+    await worker.sync_monitors_from_supabase()
+    assert len(worker.active_monitors) == 2
+    by_id = {m.id: m for m in worker.active_monitors}
+    assert by_id["mon-u1"].telegram_chat_id == "chat-user-1"
+    assert by_id["mon-u2"].telegram_chat_id == "chat-user-2"
+    assert by_id["mon-u1"].telegram_chat_id != by_id["mon-u2"].telegram_chat_id
+
+
+# ---------------------------------------------------------------------------
+# TEST 17: Monitor sem Telegram continua válido mas não gera alerta Telegram
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_monitor_without_telegram_remains_valid_no_alert(temp_db: Database):
+    """Validates that a monitor without a linked Telegram account remains valid in memory but produces 0 alerts."""
+    link_mgr = TelegramLinkManager()
+    repo = SupabaseMonitorRepository()
+    repo.seed_in_memory_monitor(
+        UserMonitor(id="mon-no-tg", user_id="user-no-tg", query_text="Ubuntu Server", active=True, telegram_chat_id=None)
+    )
+
+    worker = CourseWorker(
+        database=temp_db,
+        link_manager=link_mgr,
+        monitor_repo=repo,
+    )
+
+    await worker.sync_monitors_from_supabase()
+    assert len(worker.active_monitors) == 1
+    mon = worker.active_monitors[0]
+    assert mon.active is True
+    assert mon.telegram_chat_id is None
+
+    # MatchingEngine must safely skip it
+    matching = MatchingEngine()
+    ev = OfferChangeEvent(
+        offer_id="off-1",
+        provider_slug="senac_sp",
+        title="Ubuntu Server",
+        change_type="STATUS_CHANGE",
+        current_state=OfferState(
+            curso="Ubuntu Server",
+            unidade="Lapa",
+            turno="Noite",
+            status="Inscrições Abertas",
+            inscricao_disponivel=True,
+        ),
+    )
+    matches = matching.match(ev, [mon])
+    assert len(matches) == 0
+
+
+# ---------------------------------------------------------------------------
+# TEST 18: Scheduler automático usa monitor hidratado
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_automatic_scheduler_uses_hydrated_monitor(temp_db: Database):
+    """Validates that monitors evaluated during scheduled cycles have telegram_chat_id populated."""
+    link_mgr = TelegramLinkManager()
+    link_mgr._accounts_by_user["user-sched"] = MagicMock(user_id="user-sched", telegram_chat_id="chat-sched-555", active=True)
+    link_mgr._accounts_by_chat["chat-sched-555"] = link_mgr._accounts_by_user["user-sched"]
+
+    repo = SupabaseMonitorRepository()
+    repo.seed_in_memory_monitor(
+        UserMonitor(id="mon-sched", user_id="user-sched", query_text="Redes", active=True, telegram_chat_id=None)
+    )
+
+    worker = CourseWorker(
+        database=temp_db,
+        link_manager=link_mgr,
+        monitor_repo=repo,
+    )
+
+    # When sync runs (as it does at start of run_check_cycle)
+    await worker.sync_monitors_from_supabase()
+    assert worker.active_monitors[0].telegram_chat_id == "chat-sched-555"
+
+
+# ---------------------------------------------------------------------------
+# TEST 19: /check usa monitor hidratado
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_user_check_uses_hydrated_monitor(temp_db: Database):
+    """Validates that /check correctly resolves telegram_chat_id and triggers match for available offers."""
+    from app.providers.base import ProviderSearchResult, SearchStatus
+
+    link_mgr = TelegramLinkManager()
+    link_mgr._accounts_by_user["user-check"] = MagicMock(user_id="user-check", telegram_chat_id="chat-check-777", active=True)
+    link_mgr._accounts_by_chat["chat-check-777"] = link_mgr._accounts_by_user["user-check"]
+
+    repo = SupabaseMonitorRepository()
+    # The monitor in DB has telegram_chat_id=None
+    repo.seed_in_memory_monitor(
+        UserMonitor(
+            id="mon-chk",
+            user_id="user-check",
+            query_text="Técnico em Redes de Computadores",
+            active=True,
+            all_providers=True,
+            telegram_chat_id=None,
+        )
+    )
+
+    mock_provider = MagicMock()
+    mock_provider.name = "Senac São Paulo"
+    mock_provider.slug = "senac_sp"
+
+    offer1 = NormalizedOffer(
+        provider_slug="senac_sp",
+        institution_name="Senac São Paulo",
+        external_id="off-101",
+        title="Técnico em Redes de Computadores",
+        campus_or_unit="Santo André",
+        shift="Noturno",
+        status="Inscrições abertas",
+        inscricao_disponivel=True,
+        bolsa_disponivel=False,
+        source_url="https://sp.senac.br/oferta/101",
+    )
+
+    mock_provider.search_offers_structured = AsyncMock(
+        return_value=ProviderSearchResult(
+            provider_slug="senac_sp",
+            search_query="Técnico em Redes de Computadores",
+            status=SearchStatus.AVAILABLE_OFFERS_FOUND,
+            course_name="Técnico em Redes de Computadores",
+            classes_count=1,
+            available_classes_count=1,
+            raw_status_list=["Inscrições abertas"],
+            offers=[offer1],
+        )
+    )
+
+    worker = CourseWorker(
+        database=temp_db,
+        link_manager=link_mgr,
+        monitor_repo=repo,
+    )
+    worker.registry._providers["senac_sp"] = mock_provider
+
+    res = await worker.run_user_check(chat_id="chat-check-777")
+    assert "🎉 VAGA ENCONTRADA!" in res
+    assert "Santo André" in res
+    assert "https://sp.senac.br/oferta/101" in res
+
+
+# ---------------------------------------------------------------------------
+# TEST 20: Técnico em Redes de Computadores gera match quando filtros são 'all'
+# ---------------------------------------------------------------------------
+def test_redes_computadores_generates_match_with_all_filters():
+    """Validates that Técnico em Redes de Computadores produces a successful match when filters are 'all'."""
+    matching = MatchingEngine()
+    mon = UserMonitor(
+        id="mon-redes-all",
+        user_id="user-8023",
+        query_text="Técnico em Redes de Computadores",
+        active=True,
+        all_providers=True,
+        shift=None,  # Qualquer
+        modality="all",
+        opportunity_type="all",
+        telegram_chat_id="6118615306",
+    )
+
+    state = OfferState(
+        curso="Técnico em Redes de Computadores",
+        unidade="Santo André",
+        turno="Noturno",
+        status="Bolsa Disponível",
+        codigo_oferta="9900356740",
+        inscricao_disponivel=False,
+        bolsa_disponivel=True,
+        url="https://www.sp.senac.br/cursos-tecnicos/curso-tecnico-em-redes-de-computadores?oferta=9900356740",
+    )
+
+    event = OfferChangeEvent(
+        offer_id="9900356740",
+        provider_slug="senac_sp",
+        institution_name="Senac São Paulo",
+        title="Técnico em Redes de Computadores",
+        city="Santo André",
+        shift="Noturno",
+        modality="presencial",
+        change_type="SCHOLARSHIP_OPEN",
+        current_state=state,
+        inscricao_disponivel=False,
+        bolsa_disponivel=True,
+    )
+
+    matches = matching.match(event, [mon])
+    assert len(matches) == 1
+    assert matches[0].telegram_chat_id == "6118615306"
+    assert matches[0].user_id == "user-8023"
+

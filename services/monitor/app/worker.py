@@ -75,36 +75,71 @@ class CourseWorker:
         val = self.db.get_setting("is_paused", "false")
         return val.lower() in ("true", "1", "yes")
 
+    def _hydrate_monitors_telegram(self, monitors: List[UserMonitor]) -> List[UserMonitor]:
+        """Hydrates telegram_chat_id for monitors using TelegramLinkManager with fallback and cache retention."""
+        if not self.link_manager or not monitors:
+            return monitors
+
+        # Cache of previously known telegram_chat_id by monitor_id (last-known-good)
+        last_known_chat_ids = {
+            m.id: m.telegram_chat_id
+            for m in self.active_monitors
+            if m.telegram_chat_id
+        }
+
+        # Try batch lookup from active accounts first
+        active_map: Dict[str, str] = {}
+        try:
+            accounts = self.link_manager.list_active_accounts()
+            for acc in accounts:
+                if acc.active and acc.telegram_chat_id:
+                    active_map[acc.user_id] = acc.telegram_chat_id
+        except Exception as err:
+            logger.warning(f"[{self.worker_id}] Falha ao listar contas ativas no link_manager para hidratação: {err}")
+
+        for mon in monitors:
+            if mon.telegram_chat_id:
+                continue
+
+            # 1. Try batch mapping
+            cid = active_map.get(mon.user_id)
+
+            # 2. Try single lookup fallback if not in batch map
+            if not cid:
+                try:
+                    cid = self.link_manager.get_chat_id_by_user(mon.user_id)
+                except Exception as err:
+                    logger.warning(
+                        f"[{self.worker_id}] Erro ao buscar telegram_chat_id para user {mon.user_id}: {err}"
+                    )
+                    cid = None
+
+            # 3. Fallback to last-known-good cache if lookup failed
+            if not cid and mon.id in last_known_chat_ids:
+                cid = last_known_chat_ids[mon.id]
+
+            if cid:
+                mon.telegram_chat_id = str(cid)
+
+        return monitors
+
     def register_monitor(self, monitor: UserMonitor) -> None:
         """Registers or updates a user monitor in memory."""
         self.active_monitors = [m for m in self.active_monitors if m.id != monitor.id]
-        if not monitor.telegram_chat_id and self.link_manager:
-            chat_id = self.link_manager.get_chat_id_by_user(monitor.user_id)
-            if chat_id:
-                monitor.telegram_chat_id = chat_id
+        self._hydrate_monitors_telegram([monitor])
         if monitor.active:
             self.active_monitors.append(monitor)
             logger.info(f"Monitor {monitor.id} registrado para usuário {monitor.user_id}.")
 
     def _ensure_monitors_telegram(self) -> None:
         """Hydrates telegram_chat_id from Supabase for any active monitors lacking it."""
-        if self.link_manager:
-            for mon in self.active_monitors:
-                if not mon.telegram_chat_id:
-                    chat_id = self.link_manager.get_chat_id_by_user(mon.user_id)
-                    if chat_id:
-                        mon.telegram_chat_id = chat_id
+        self._hydrate_monitors_telegram(self.active_monitors)
 
     async def sync_monitors_from_supabase(self) -> List[UserMonitor]:
         """Synchronizes active monitors from Supabase with a last-known-good cache strategy."""
         try:
             fresh_monitors = await self.monitor_repo.list_active_monitors()
-            if self.link_manager:
-                for m in fresh_monitors:
-                    if not m.telegram_chat_id:
-                        chat_id = self.link_manager.get_chat_id_by_user(m.user_id)
-                        if chat_id:
-                            m.telegram_chat_id = chat_id
+            self._hydrate_monitors_telegram(fresh_monitors)
 
             if fresh_monitors or self.monitor_repo.supabase is not None or not self.active_monitors:
                 self.active_monitors = fresh_monitors
@@ -182,10 +217,16 @@ class CourseWorker:
         if not account:
             return "ℹ️ Sua conta não está vinculada. Use /start <token> para conectar."
 
+        # Prioritize active monitors already synchronized and hydrated in memory
         user_monitors = [
-            m for m in await self.monitor_repo.get_user_monitors(account.user_id)
-            if m.active
+            m for m in self.active_monitors
+            if m.user_id == account.user_id and m.active
         ]
+        if not user_monitors:
+            raw_monitors = await self.monitor_repo.get_user_monitors(account.user_id)
+            user_monitors = [m for m in raw_monitors if m.active]
+
+        self._hydrate_monitors_telegram(user_monitors)
         if not user_monitors:
             return "ℹ️ Você não possui nenhum monitor ativo para verificação. Crie ou reative seus monitores no dashboard."
 
@@ -242,6 +283,7 @@ class CourseWorker:
                     elif search_res.status == SearchStatus.AVAILABLE_OFFERS_FOUND:
                         # Evaluate MatchingEngine with real normalized technical offers
                         matched_offers = []
+                        check_engine = MatchingEngine(registry=self.registry)
                         for off in search_res.offers:
                             if not (off.inscricao_disponivel or off.bolsa_disponivel):
                                 continue
@@ -268,7 +310,7 @@ class CourseWorker:
                                 inscricao_disponivel=off.inscricao_disponivel,
                                 bolsa_disponivel=off.bolsa_disponivel,
                             )
-                            matches = self.matching_engine.match(ev, [mon])
+                            matches = check_engine.match(ev, [mon])
                             if matches:
                                 matched_offers.append((off, matches[0]))
 
