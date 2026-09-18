@@ -1,4 +1,4 @@
-﻿"""Multi-user isolation and cross-course alert rejection tests."""
+"""Multi-user isolation and cross-course alert rejection tests."""
 
 from unittest.mock import AsyncMock, MagicMock
 import pytest
@@ -208,3 +208,267 @@ async def test_worker_persists_alerts_to_supabase():
     assert payload["channel"] == "telegram"
     assert payload["delivered"] is True
     assert payload["message_content"] == "Vaga Aberta!"
+
+
+@pytest.mark.asyncio
+async def test_check_executes_only_active_monitors_for_user():
+    """TEST 1: User with Monitor A (active=true), Monitor B (active=true), Monitor C (active=false).
+    /check must execute exactly A and B.
+    """
+    mock_repo = MagicMock()
+    mon_a = UserMonitor(id="mon-a", user_id="user-1", query_text="Curso A", active=True)
+    mon_b = UserMonitor(id="mon-b", user_id="user-1", query_text="Curso B", active=True)
+
+    # get_user_monitors with active_only=True returns only A and B
+    mock_repo.get_user_monitors = AsyncMock(return_value=[mon_a, mon_b])
+
+    mock_link_mgr = MagicMock()
+    mock_link_mgr.get_account_by_chat.return_value = MagicMock(user_id="user-1")
+    mock_link_mgr.list_active_accounts.return_value = [
+        MagicMock(user_id="user-1", telegram_chat_id="chat-1", active=True)
+    ]
+
+    mock_provider = MagicMock()
+    del mock_provider.search_offers_structured
+    mock_provider.name = "Test Provider"
+    mock_provider.search_offers = AsyncMock(return_value=[])
+
+    mock_registry = MagicMock()
+    mock_registry.get_active_providers.return_value = {"test_prov": mock_provider}
+
+    worker = CourseWorker(
+        worker_id="test-worker",
+        monitor_repo=mock_repo,
+        link_manager=mock_link_mgr,
+        registry=mock_registry,
+    )
+
+    res = await worker.run_user_check(chat_id="chat-1")
+
+    assert "2 monitor(es) ativo(s)" in res
+    assert "[1] Curso A" in res
+    assert "[2] Curso B" in res
+    assert mock_provider.search_offers.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_check_dynamically_detects_new_monitor_without_worker_restart():
+    """TEST 2: Worker running with Monitor A in memory; Monitor D is created in Supabase.
+    Without restarting worker, /check must execute A and D immediately.
+    """
+    mon_a = UserMonitor(id="mon-a", user_id="user-1", query_text="Curso A", active=True)
+    mon_d = UserMonitor(id="mon-d", user_id="user-1", query_text="Curso D", active=True)
+
+    mock_repo = MagicMock()
+    # First call had only mon_a; now Supabase has mon_a and mon_d
+    mock_repo.get_user_monitors = AsyncMock(return_value=[mon_a, mon_d])
+
+    mock_link_mgr = MagicMock()
+    mock_link_mgr.get_account_by_chat.return_value = MagicMock(user_id="user-1")
+    mock_link_mgr.list_active_accounts.return_value = [
+        MagicMock(user_id="user-1", telegram_chat_id="chat-1", active=True)
+    ]
+
+    mock_provider = MagicMock()
+    del mock_provider.search_offers_structured
+    mock_provider.name = "Test Provider"
+    mock_provider.search_offers = AsyncMock(return_value=[])
+
+    mock_registry = MagicMock()
+    mock_registry.get_active_providers.return_value = {"test_prov": mock_provider}
+
+    worker = CourseWorker(
+        worker_id="test-worker",
+        monitor_repo=mock_repo,
+        link_manager=mock_link_mgr,
+        registry=mock_registry,
+    )
+    # Simulate worker had only mon_a in memory from previous startup
+    worker.active_monitors = [mon_a]
+
+    res = await worker.run_user_check(chat_id="chat-1")
+
+    assert "2 monitor(es) ativo(s)" in res
+    assert "Curso A" in res
+    assert "Curso D" in res
+    # Confirms worker's internal active_monitors was also updated
+    assert any(m.id == "mon-d" for m in worker.active_monitors)
+
+
+@pytest.mark.asyncio
+async def test_check_ignores_monitor_paused_on_dashboard_without_restart():
+    """TEST 3: Monitor B is paused on dashboard (active=False in Supabase).
+    Without restarting worker, /check must NOT execute Monitor B.
+    """
+    mon_a = UserMonitor(id="mon-a", user_id="user-1", query_text="Curso A", active=True)
+    mon_b = UserMonitor(id="mon-b", user_id="user-1", query_text="Curso B", active=False)
+
+    mock_repo = MagicMock()
+    # Supabase returns only active monitors when active_only=True
+    mock_repo.get_user_monitors = AsyncMock(return_value=[mon_a])
+
+    mock_link_mgr = MagicMock()
+    mock_link_mgr.get_account_by_chat.return_value = MagicMock(user_id="user-1")
+    mock_link_mgr.list_active_accounts.return_value = [
+        MagicMock(user_id="user-1", telegram_chat_id="chat-1", active=True)
+    ]
+
+    mock_provider = MagicMock()
+    del mock_provider.search_offers_structured
+    mock_provider.name = "Test Provider"
+    mock_provider.search_offers = AsyncMock(return_value=[])
+
+    mock_registry = MagicMock()
+    mock_registry.get_active_providers.return_value = {"test_prov": mock_provider}
+
+    worker = CourseWorker(
+        worker_id="test-worker",
+        monitor_repo=mock_repo,
+        link_manager=mock_link_mgr,
+        registry=mock_registry,
+    )
+    # Worker had both in memory previously
+    worker.active_monitors = [mon_a, mon_b]
+
+    res = await worker.run_user_check(chat_id="chat-1")
+
+    assert "1 monitor(es) ativo(s)" in res
+    assert "Curso A" in res
+    assert "Curso B" not in res
+    # Confirms paused mon_b was also purged from worker's active_monitors
+    assert not any(m.id == "mon-b" for m in worker.active_monitors)
+
+
+@pytest.mark.asyncio
+async def test_check_resumes_reactivated_monitor_immediately():
+    """TEST 4: Monitor B is reactivated in Supabase.
+    /check must immediately include Monitor B again without restarting worker.
+    """
+    mon_a = UserMonitor(id="mon-a", user_id="user-1", query_text="Curso A", active=True)
+    mon_b = UserMonitor(id="mon-b", user_id="user-1", query_text="Curso B", active=True)
+
+    mock_repo = MagicMock()
+    mock_repo.get_user_monitors = AsyncMock(return_value=[mon_a, mon_b])
+
+    mock_link_mgr = MagicMock()
+    mock_link_mgr.get_account_by_chat.return_value = MagicMock(user_id="user-1")
+    mock_link_mgr.list_active_accounts.return_value = [
+        MagicMock(user_id="user-1", telegram_chat_id="chat-1", active=True)
+    ]
+
+    mock_provider = MagicMock()
+    del mock_provider.search_offers_structured
+    mock_provider.name = "Test Provider"
+    mock_provider.search_offers = AsyncMock(return_value=[])
+
+    mock_registry = MagicMock()
+    mock_registry.get_active_providers.return_value = {"test_prov": mock_provider}
+
+    worker = CourseWorker(
+        worker_id="test-worker",
+        monitor_repo=mock_repo,
+        link_manager=mock_link_mgr,
+        registry=mock_registry,
+    )
+    # Worker had only mon_a in memory
+    worker.active_monitors = [mon_a]
+
+    res = await worker.run_user_check(chat_id="chat-1")
+
+    assert "2 monitor(es) ativo(s)" in res
+    assert "Curso A" in res
+    assert "Curso B" in res
+
+
+@pytest.mark.asyncio
+async def test_check_supabase_failure_returns_friendly_error_without_using_stale_cache():
+    """TEST 5: Supabase failure during /check.
+    Must NOT execute stale cache, must return friendly message, and trigger zero alerts.
+    """
+    mock_repo = MagicMock()
+    mock_repo.get_user_monitors = AsyncMock(side_effect=Exception("Database connection timeout"))
+
+    mock_link_mgr = MagicMock()
+    mock_link_mgr.get_account_by_chat.return_value = MagicMock(user_id="user-1")
+
+    mock_provider = MagicMock()
+    mock_provider.search_offers = AsyncMock()
+
+    mock_registry = MagicMock()
+    mock_registry.get_active_providers.return_value = {"test_prov": mock_provider}
+
+    worker = CourseWorker(
+        worker_id="test-worker",
+        monitor_repo=mock_repo,
+        link_manager=mock_link_mgr,
+        registry=mock_registry,
+    )
+    # Stale monitor in memory
+    worker.active_monitors = [
+        UserMonitor(id="mon-stale", user_id="user-1", query_text="Curso Stale", active=True)
+    ]
+
+    res = await worker.run_user_check(chat_id="chat-1")
+
+    assert "Não foi possível carregar seus monitoramentos agora. Tente novamente em alguns instantes." in res
+    assert mock_provider.search_offers.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_check_multi_user_isolation_never_loads_other_user_monitors():
+    """TEST 6: /check for User A must NEVER execute User B's monitors."""
+    mon_a = UserMonitor(id="mon-a", user_id="user-a", query_text="Gastronomia", active=True)
+    mon_b = UserMonitor(id="mon-b", user_id="user-b", query_text="Marketing", active=True)
+
+    mock_repo = MagicMock()
+    async def get_user_monitors_side_effect(user_id: str, active_only: bool = False):
+        if user_id == "user-a":
+            return [mon_a]
+        elif user_id == "user-b":
+            return [mon_b]
+        return []
+
+    mock_repo.get_user_monitors = AsyncMock(side_effect=get_user_monitors_side_effect)
+
+    mock_link_mgr = MagicMock()
+    def get_account_side_effect(chat_id: str):
+        if chat_id == "chat-user-a":
+            return MagicMock(user_id="user-a")
+        elif chat_id == "chat-user-b":
+            return MagicMock(user_id="user-b")
+        return None
+
+    mock_link_mgr.get_account_by_chat.side_effect = get_account_side_effect
+    mock_link_mgr.list_active_accounts.return_value = [
+        MagicMock(user_id="user-a", telegram_chat_id="chat-user-a", active=True),
+        MagicMock(user_id="user-b", telegram_chat_id="chat-user-b", active=True),
+    ]
+
+    mock_provider = MagicMock()
+    del mock_provider.search_offers_structured
+    mock_provider.name = "Test Provider"
+    mock_provider.search_offers = AsyncMock(return_value=[])
+
+    mock_registry = MagicMock()
+    mock_registry.get_active_providers.return_value = {"test_prov": mock_provider}
+
+    worker = CourseWorker(
+        worker_id="test-worker",
+        monitor_repo=mock_repo,
+        link_manager=mock_link_mgr,
+        registry=mock_registry,
+    )
+    # Memory has both users' monitors
+    worker.active_monitors = [mon_a, mon_b]
+
+    # Run check for User A
+    res_a = await worker.run_user_check(chat_id="chat-user-a")
+    assert "1 monitor(es) ativo(s)" in res_a
+    assert "Gastronomia" in res_a
+    assert "Marketing" not in res_a
+
+    # Run check for User B
+    res_b = await worker.run_user_check(chat_id="chat-user-b")
+    assert "1 monitor(es) ativo(s)" in res_b
+    assert "Marketing" in res_b
+    assert "Gastronomia" not in res_b

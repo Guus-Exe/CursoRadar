@@ -208,7 +208,12 @@ class CourseWorker:
                     "Acesse o dashboard web, gere seu link e envie `/start <token>` para conectar."
                 )
 
-            monitors = await self.monitor_repo.get_user_monitors(account.user_id)
+            try:
+                monitors = await self.monitor_repo.get_user_monitors(account.user_id)
+            except Exception as err:
+                logger.error(f"[{self.worker_id}][/status] Erro ao buscar monitores do usuário {account.user_id}: {err}")
+                return "❌ Não foi possível carregar seus monitoramentos agora. Tente novamente em alguns instantes."
+
             if not monitors:
                 return (
                     "📊 STATUS DOS SEUS MONITORES NO CURSORADAR\n\n"
@@ -257,18 +262,29 @@ class CourseWorker:
         if not account:
             return "ℹ️ Sua conta não está vinculada. Use /start <token> para conectar."
 
-        # Prioritize active monitors already synchronized and hydrated in memory
-        user_monitors = [
-            m for m in self.active_monitors
-            if m.user_id == account.user_id and m.active
-        ]
-        if not user_monitors:
-            raw_monitors = await self.monitor_repo.get_user_monitors(account.user_id)
-            user_monitors = [m for m in raw_monitors if m.active]
+        # Comandos manuais consultam diretamente o Supabase em tempo real (fonte da verdade)
+        try:
+            raw_monitors = await self.monitor_repo.get_user_monitors(account.user_id, active_only=True)
+        except Exception as err:
+            logger.error(
+                f"[{self.worker_id}][/check] Falha ao consultar monitores do usuário {account.user_id} no Supabase: {err}"
+            )
+            return "❌ Não foi possível carregar seus monitoramentos agora. Tente novamente em alguns instantes."
 
-        self._hydrate_monitors_telegram(user_monitors)
+        user_monitors = [m for m in raw_monitors if m.active]
         if not user_monitors:
             return "ℹ️ Você não possui nenhum monitor ativo para verificação. Crie ou reative seus monitores no dashboard."
+
+        self._hydrate_monitors_telegram(user_monitors)
+
+        # Mantém o cache do worker sincronizado com os monitores ativos do usuário
+        active_ids = {m.id for m in user_monitors}
+        self.active_monitors = [
+            m for m in self.active_monitors
+            if not (m.user_id == account.user_id and m.id not in active_ids)
+        ]
+        for mon in user_monitors:
+            self.register_monitor(mon)
 
         results_lines = [f"🔄 Verificação concluída para seu(s) {len(user_monitors)} monitor(es) ativo(s):\n"]
         active_providers = self.registry.get_active_providers()
@@ -391,7 +407,12 @@ class CourseWorker:
         if not account:
             return "ℹ️ Sua conta não está vinculada. Use /start <token> para conectar."
 
-        monitors = await self.monitor_repo.get_user_monitors(account.user_id)
+        try:
+            monitors = await self.monitor_repo.get_user_monitors(account.user_id)
+        except Exception as err:
+            logger.error(f"[{self.worker_id}][/pause] Erro ao buscar monitores do usuário {account.user_id}: {err}")
+            return "❌ Não foi possível carregar seus monitoramentos agora. Tente novamente em alguns instantes."
+
         if not monitors:
             return "ℹ️ Você não possui monitores cadastrados."
 
@@ -442,7 +463,12 @@ class CourseWorker:
         if not account:
             return "ℹ️ Sua conta não está vinculada. Use /start <token> para conectar."
 
-        monitors = await self.monitor_repo.get_user_monitors(account.user_id)
+        try:
+            monitors = await self.monitor_repo.get_user_monitors(account.user_id)
+        except Exception as err:
+            logger.error(f"[{self.worker_id}][/resume] Erro ao buscar monitores do usuário {account.user_id}: {err}")
+            return "❌ Não foi possível carregar seus monitoramentos agora. Tente novamente em alguns instantes."
+
         if not monitors:
             return "ℹ️ Você não possui monitores cadastrados."
 
