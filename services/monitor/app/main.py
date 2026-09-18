@@ -6,30 +6,31 @@ import sys
 from typing import Optional
 from app.config import get_settings
 from app.database import Database
+from app.matching import MatchingEngine
 from app.monitor import CourseMonitor
+from app.monitors_repo import SupabaseMonitorRepository
 from app.notifications.telegram import TelegramProvider
 from app.notifications.whatsapp import WhatsAppProvider
+from app.providers.registry import get_provider_registry
+from app.providers.senac import SenacSPProvider
 from app.scrapers.senac import SenacScraper
 from app.telegram_link import TelegramLinkManager
 from app.utils.logger import logger
+from app.worker import CourseWorker
 
 
 async def run_application() -> None:
-    """Initializes and runs the Senac course monitor."""
+    """Initializes and runs the CursoRadar multi-user worker."""
     settings = get_settings()
     logger.info("==================================================")
-    logger.info("       INICIANDO SENAC MONITOR — SP               ")
+    logger.info("     INICIANDO CURSORADAR MULTI-USER WORKER       ")
     logger.info("==================================================")
-    logger.info(f"Curso alvo: {settings.course_name}")
-    logger.info(f"Unidade alvo: {settings.unit_name} | Turno: {settings.target_shift}")
     logger.info(f"Intervalo de checagem: {settings.check_interval_minutes} minuto(s)")
-    logger.info(f"URL: {settings.senac_offer_url}")
+    logger.info(f"Intervalo de descoberta: {settings.discovery_interval_minutes} minuto(s)")
+    logger.info(f"Legacy Monitor Habilitado: {settings.enable_legacy_monitor}")
 
     # Database
     db = Database(settings.database_url)
-
-    # Scraper
-    scraper = SenacScraper()
 
     # Link Manager (Supabase persistence with in-memory fallback)
     link_manager = TelegramLinkManager(
@@ -43,44 +44,52 @@ async def run_application() -> None:
         chat_id=settings.telegram_chat_id,
         link_manager=link_manager,
     )
-    whatsapp_provider = WhatsAppProvider()
 
-    providers = [telegram_provider, whatsapp_provider]
-
-    # Monitor
-    monitor = CourseMonitor(
-        settings=settings,
-        database=db,
-        scraper=scraper,
-        providers=providers,
+    # Monitor Repository
+    monitor_repo = SupabaseMonitorRepository(
+        supabase_url=settings.supabase_url,
+        supabase_service_role_key=settings.supabase_service_role_key,
+        supabase_client=link_manager.supabase,
     )
 
-    # Callbacks for Telegram bot commands
-    async def cmd_status_callback() -> str:
-        return await monitor.get_status_summary()
+    # Provider Registry
+    registry = get_provider_registry()
+    senac_provider = SenacSPProvider(settings=settings)
+    registry.register(senac_provider)
 
-    async def cmd_check_callback() -> str:
-        diff = await monitor.run_check_cycle()
-        if diff is None:
-            return "⚠️ A verificação encontrou um erro ou o monitor está pausado. Verifique os logs."
-        curr = diff.current_state
-        return (
-            f"✅ Verificação concluída!\n\n"
-            f"Curso: {curr.curso}\n"
-            f"Status: {curr.status}\n"
-            f"Inscrição: {'Aberta' if curr.inscricao_disponivel else 'Indisponível'}\n"
-            f"Bolsa: {'Disponível' if curr.bolsa_disponivel else 'Indisponível'}\n"
-            f"Mudanças: {diff.summary()}"
-        )
+    # Matching Engine
+    matching_engine = MatchingEngine(registry=registry)
 
-    def cmd_link_callback() -> str:
-        return settings.senac_offer_url
+    # Primary Multi-User Worker
+    worker = CourseWorker(
+        worker_id="cursoradar-worker-main",
+        settings=settings,
+        database=db,
+        registry=registry,
+        telegram_provider=telegram_provider,
+        link_manager=link_manager,
+        matching_engine=matching_engine,
+        monitor_repo=monitor_repo,
+    )
 
-    def cmd_pause_callback() -> str:
-        return monitor.pause()
+    # Initial sync from Supabase
+    await worker.sync_monitors_from_supabase()
 
-    def cmd_resume_callback() -> str:
-        return monitor.resume()
+    # Callbacks for Telegram bot commands wired to CourseWorker
+    async def cmd_status_callback(chat_id: Optional[str] = None) -> str:
+        return await worker.get_status_summary(chat_id)
+
+    async def cmd_check_callback(chat_id: Optional[str] = None) -> str:
+        return await worker.run_user_check(chat_id)
+
+    async def cmd_link_callback(chat_id: Optional[str] = None) -> str:
+        return await worker.get_user_links(chat_id)
+
+    async def cmd_pause_callback(chat_id: Optional[str] = None, arg: Optional[str] = None) -> str:
+        return await worker.pause_user(chat_id, arg)
+
+    async def cmd_resume_callback(chat_id: Optional[str] = None, arg: Optional[str] = None) -> str:
+        return await worker.resume_user(chat_id, arg)
 
     # Telegram bot app
     telegram_app = telegram_provider.create_application(
@@ -91,14 +100,27 @@ async def run_application() -> None:
         resume_callback=cmd_resume_callback,
     )
 
-    # Start APScheduler
-    monitor.start_scheduler()
+    # Start primary multi-user scheduler
+    worker.start_scheduler()
+
+    # Optional legacy fallback (only if explicitly enabled)
+    legacy_monitor: Optional[CourseMonitor] = None
+    if settings.enable_legacy_monitor:
+        logger.warning("ATENÇÃO: ENABLE_LEGACY_MONITOR está ativo. Iniciando CourseMonitor legado em paralelo.")
+        scraper = SenacScraper()
+        legacy_monitor = CourseMonitor(
+            settings=settings,
+            database=db,
+            scraper=scraper,
+            providers=[telegram_provider],
+        )
+        legacy_monitor.start_scheduler()
 
     # Graceful shutdown event
     stop_event = asyncio.Event()
 
     def request_shutdown() -> None:
-        logger.info("Recebido sinal de encerramento. Finalizando monitor...")
+        logger.info("Recebido sinal de encerramento. Finalizando worker...")
         stop_event.set()
 
     # Setup signal handlers where supported
@@ -116,7 +138,7 @@ async def run_application() -> None:
             await telegram_app.initialize()
             await telegram_app.start()
             await telegram_app.updater.start_polling()  # type: ignore
-            logger.info("Bot do Telegram pronto para responder comandos (/status, /check, /link, /pause, /resume).")
+            logger.info("Bot do Telegram pronto para responder comandos multiusuário (/status, /check, /link, /pause, /resume).")
 
             # Wait for shutdown signal
             await stop_event.wait()
@@ -132,15 +154,17 @@ async def run_application() -> None:
     else:
         logger.warning(
             "Bot do Telegram não inicializado porque TELEGRAM_BOT_TOKEN não foi configurado no .env. "
-            "O monitor continuará executando as checagens periódicas em modo headless."
+            "O worker continuará executando as checagens periódicas em modo headless."
         )
         try:
             await stop_event.wait()
         except (KeyboardInterrupt, SystemExit):
             pass
 
-    monitor.stop_scheduler()
-    logger.info("Senac Monitor finalizado com sucesso.")
+    worker.stop_scheduler()
+    if legacy_monitor is not None:
+        legacy_monitor.stop_scheduler()
+    logger.info("CursoRadar Worker finalizado com sucesso.")
 
 
 def main() -> None:

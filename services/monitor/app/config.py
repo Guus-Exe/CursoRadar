@@ -135,6 +135,13 @@ class Settings(BaseSettings):
         alias="WHATSAPP_PHONE_NUMBER",
     )
 
+    # Legacy CourseMonitor toggle (disabled by default in production)
+    enable_legacy_monitor: bool = Field(
+        default=False,
+        description="Habilita monitor legado CourseMonitor em produção (desativado por padrão)",
+        alias="ENABLE_LEGACY_MONITOR",
+    )
+
 
 def get_settings() -> Settings:
     """Returns singleton instance of application settings."""

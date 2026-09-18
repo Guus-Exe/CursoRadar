@@ -1,6 +1,8 @@
 """Telegram notification provider and bot command handler."""
 
+import asyncio
 from datetime import datetime
+import inspect
 from typing import Any, Callable, Coroutine, Optional
 from telegram import Bot, Update
 from telegram.constants import ParseMode
@@ -233,30 +235,57 @@ class TelegramProvider(NotificationProvider):
             )
             await update.message.reply_text(text)
 
+        async def _execute_callback(cb: Any, chat_id: Optional[str] = None, arg: Optional[str] = None) -> Any:
+            try:
+                sig = inspect.signature(cb)
+                num_params = len(sig.parameters)
+                if num_params >= 2:
+                    res = cb(chat_id, arg)
+                elif num_params == 1:
+                    res = cb(chat_id)
+                else:
+                    res = cb()
+                if asyncio.iscoroutine(res):
+                    return await res
+                return res
+            except Exception as err:
+                logger.error(f"Erro ao executar callback do comando Telegram: {err}")
+                return f"❌ Erro ao processar comando: {err}"
+
         async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if update.message:
-                msg = await status_callback()
+                chat_id = str(update.effective_chat.id) if update.effective_chat else None
+                msg = await _execute_callback(status_callback, chat_id=chat_id)
                 await update.message.reply_text(msg)
 
         async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if update.message:
-                await update.message.reply_text("🔄 Executando verificação manual agora...")
-                msg = await check_callback()
+                chat_id = str(update.effective_chat.id) if update.effective_chat else None
+                await update.message.reply_text("🔄 Executando verificação agora...")
+                msg = await _execute_callback(check_callback, chat_id=chat_id)
                 await update.message.reply_text(msg)
 
         async def cmd_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if update.message:
-                url = link_callback()
-                await update.message.reply_text(f"🔗 Link monitorado:\n{url}")
+                chat_id = str(update.effective_chat.id) if update.effective_chat else None
+                url = await _execute_callback(link_callback, chat_id=chat_id)
+                if isinstance(url, str) and (url.startswith("http://") or url.startswith("https://")):
+                    await update.message.reply_text(f"🔗 Link monitorado:\n{url}")
+                else:
+                    await update.message.reply_text(str(url))
 
         async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if update.message:
-                msg = pause_callback()
+                chat_id = str(update.effective_chat.id) if update.effective_chat else None
+                arg = context.args[0] if context.args and len(context.args) > 0 else None
+                msg = await _execute_callback(pause_callback, chat_id=chat_id, arg=arg)
                 await update.message.reply_text(msg)
 
         async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if update.message:
-                msg = resume_callback()
+                chat_id = str(update.effective_chat.id) if update.effective_chat else None
+                arg = context.args[0] if context.args and len(context.args) > 0 else None
+                msg = await _execute_callback(resume_callback, chat_id=chat_id, arg=arg)
                 await update.message.reply_text(msg)
 
         app.add_handler(CommandHandler("start", cmd_start))
